@@ -1,7 +1,7 @@
 ## paperback ##
 
 **NOTE**: While paperback is currently fully functional, all of the development
-of "paperpack v0" is experimental and the format of the various data portions
+of "paperback v0" is experimental and the format of the various data portions
 of paperback are subject to change without warning. This means that a backup
 made today might not work with paperback tomorrow. However, once there is a
 proper release of paperback, the format of that version of paperback will be

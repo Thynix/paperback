@@ -30,7 +30,7 @@ For the purpose of this document, the set of people who possess a "key shard"
 are called "key-holders". When `N` people come together to perform a recovery
 event, that group is called a "quorum" (with each member being called a "quorum
 member"). In this document, `K` refers to the **total** number of key shards
-(including any key shards created after ).
+(including any key shards created after the initial ones).
 
 For the purposes of simplicity, we assume that each key holder only has one key
 shard in their possession. Key-holders holding multiple key shards are counted
@@ -120,9 +120,9 @@ function are as follows:
 [Shamir Secret Sharing][sss] in `GF(2^32)` (to allow for smaller chances of
 shard collisions if the x-values are randomly chosen -- but a larger field such
 as `GF(2^64)` would be even better). At the moment, `Secret_Recover` and
-`Secret_Expand` are implemented using Langrange polynomial interpolation, but
+`Secret_Expand` are implemented using Lagrange polynomial interpolation, but
 more efficient methods (the barycentric form of the Lagrange polynomials,
-Vangermonde matricies, Sylvester's formula, Neville's algorithm) that provide
+Vandermonde matrices, Sylvester's formula, Neville's algorithm) that provide
 the same security guarantees (and accurate results) are also acceptable.
 
 `AEAD_GenKey` and `Sig_GenPrivKey` are both implemented using the relevant
@@ -289,7 +289,7 @@ if error
 
 // Effectively, check if the document is sealed.
 if K_id_priv is not all zeroes
-    // Make sure that that K_id_priv matches. At this point, we've already
+    // Make sure that K_id_priv matches. At this point, we've already
     // revealed the secrets but it doesn't hurt to double-check.
     if Sig_GetPubKey(K_id_priv) != Doc[id_pub]
         abort "Inconsistent identities -- forgery detected."
@@ -380,7 +380,7 @@ if error
 
 // Effectively, check if the document is sealed.
 if K_id_priv is not all zeroes
-    // Make sure that that K_id_priv matches. At this point, we've already
+    // Make sure that K_id_priv matches. At this point, we've already
     // revealed the secrets but it doesn't hurt to double-check.
     if Sig_GetPubKey(K_id_priv) != K_id_pub
         abort "Inconsistent identities -- forgery detected."
