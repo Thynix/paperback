@@ -169,6 +169,20 @@ session logging) can still retain it outside paperback's control, so it's
 worth clearing scrollback or using a fresh terminal session before running
 `recover --interactive`.
 
+None of the subcommands that write output files (`backup`, `recover`,
+`expand-shards`, `recreate-shards`, `reprint`, and `raw restore`) will
+overwrite a file that already exists at the target path; they fail instead,
+so a mistyped path or an accidental re-run cannot silently destroy an
+existing document, key shard, or previously recovered secret. Pass `--force`
+to any of these subcommands to overwrite an existing file anyway.
+
+The recovered secret written by `recover` and `raw restore` is created with
+permissions `0600` (readable and writable only by the owner) on Unix-like
+systems, rather than inheriting the process umask. Windows has no directly
+equivalent permission model, so on Windows the recovered secret file instead
+inherits the ACL of its parent directory, with no additional restriction
+applied.
+
 Currently, paperback only supports "interactive" input. In the future, paperback
 will be able to automatically scan the data from each QR code in an image or PDF
 version of the documents.

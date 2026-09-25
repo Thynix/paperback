@@ -38,7 +38,7 @@ use paperback::{
 
 // paperback-cli backup [--sealed] -n <QUORUM SIZE> -k <SHARDS> INPUT
 fn backup_cli() -> Command {
-    Command::new("backup")
+    add_force_arg(Command::new("backup")
             .about(r#"Create a paperback backup."#)
             .arg(Arg::new("sealed")
                 .long("sealed")
@@ -67,7 +67,7 @@ fn backup_cli() -> Command {
                 .action(ArgAction::Set)
                 .allow_hyphen_values(true)
                 .required(true)
-                .index(1))
+                .index(1)))
 }
 
 /// Validates that `quorum_size` (`-n`) and `num_shards` (`-k`) describe a
@@ -88,8 +88,91 @@ pub(crate) fn validate_shard_counts(quorum_size: u32, num_shards: u32) -> Result
     Ok(())
 }
 
+/// Adds the shared `--force` flag to a subcommand that writes one or more
+/// output files.
+pub(crate) fn add_force_arg(cmd: Command) -> Command {
+    cmd.arg(
+        Arg::new("force")
+            .long("force")
+            .help("Overwrite output files if they already exist. Without this flag, paperback refuses to overwrite an existing output file.")
+            .action(ArgAction::SetTrue),
+    )
+}
+
+/// Opens `path` for writing a new output file, refusing to silently
+/// overwrite an existing file unless `force` is set.
+///
+/// This is used for PDF outputs (main documents, key shards): clobbering a
+/// still-valid, undistributed document would be destructive, but no
+/// additional permission restriction is warranted since these are meant to
+/// be printed and shared.
+pub(crate) fn create_output_file(path: &str, force: bool) -> Result<File, Error> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true);
+    if force {
+        opts.create(true).truncate(true);
+    } else {
+        opts.create_new(true);
+    }
+    opts.open(path)
+        .map_err(|err| output_file_error(path, force, err))
+}
+
+/// Like `create_output_file`, but additionally restricts the created file to
+/// mode `0600` on Unix. Used for the two sites that write a recovered
+/// plaintext secret, rather than a PDF meant to be printed and shared.
+///
+/// Windows has no umask-based permission model equivalent to Unix's
+/// `mode()` -- `std::os::unix::fs::OpenOptionsExt` doesn't exist there, and
+/// an equivalent ACL restriction would need a crate such as `windows-acl` or
+/// manual `SetNamedSecurityInfo` calls, which is out of scope here. On
+/// non-Unix platforms this therefore behaves exactly like
+/// `create_output_file`: the file inherits the parent directory's ACL, with
+/// no additional restriction applied.
+#[cfg(unix)]
+pub(crate) fn create_secret_output_file(path: &str, force: bool) -> Result<File, Error> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).mode(0o600);
+    if force {
+        opts.create(true).truncate(true);
+    } else {
+        opts.create_new(true);
+    }
+    let file = opts
+        .open(path)
+        .map_err(|err| output_file_error(path, force, err))?;
+    // The `mode()` above is only honoured by the OS when a new inode is
+    // created; with `--force` truncating a pre-existing file in place, no
+    // new inode is created, so the file keeps whatever permissions it
+    // already had (e.g. a default-umask `0644` from some earlier, unrelated
+    // write). Fix the permissions up explicitly so `0600` holds regardless
+    // of what was there before.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to restrict permissions on '{}'", path))?;
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn create_secret_output_file(path: &str, force: bool) -> Result<File, Error> {
+    create_output_file(path, force)
+}
+
+fn output_file_error(path: &str, force: bool, err: io::Error) -> Error {
+    if !force && err.kind() == io::ErrorKind::AlreadyExists {
+        anyhow!(
+            "output file '{}' already exists; use --force to overwrite",
+            path
+        )
+    } else {
+        anyhow!("failed to open output file '{}' for writing: {}", path, err)
+    }
+}
+
 fn backup(matches: &ArgMatches) -> Result<(), Error> {
     let sealed = matches.get_flag("sealed");
+    let force = matches.get_flag("force");
     let quorum_size: u32 = matches
         .get_one::<String>("quorum-size")
         .context("required --quorum-size argument not provided")?
@@ -135,19 +218,18 @@ fn backup(matches: &ArgMatches) -> Result<(), Error> {
 
     main_document
         .to_pdf()?
-        .save(&mut BufWriter::new(File::create(format!(
-            "main_document-{}.pdf",
-            main_document.id()
-        ))?))?;
+        .save(&mut BufWriter::new(create_output_file(
+            &format!("main_document-{}.pdf", main_document.id()),
+            force,
+        )?))?;
 
     for (shard_id, (shard, codewords)) in shards {
         (shard, codewords)
             .to_pdf()?
-            .save(&mut BufWriter::new(File::create(format!(
-                "key_shard-{}-{}.pdf",
-                main_document.id(),
-                shard_id
-            ))?))?;
+            .save(&mut BufWriter::new(create_output_file(
+                &format!("key_shard-{}-{}.pdf", main_document.id(), shard_id),
+                force,
+            )?))?;
     }
 
     if matches.get_flag("print-data") {
@@ -291,7 +373,7 @@ fn read_multibase_qr<S: AsRef<str>, T: FromWire>(prompt: S, echo: bool) -> Resul
 
 // paperback-cli recover --interactive
 fn recover_cli() -> Command {
-    add_echo_args(
+    add_force_arg(add_echo_args(
         Command::new("recover")
             .about(r#"Recover a paperback backup."#)
             .arg(
@@ -310,13 +392,14 @@ fn recover_cli() -> Command {
                     .required(true)
                     .index(1),
             ),
-    )
+    ))
 }
 
 fn recover(matches: &ArgMatches) -> Result<(), Error> {
     let interactive = matches.get_flag("interactive");
     ensure!(interactive, "PDF scanning not yet implemented");
     let echo = resolve_echo(matches);
+    let force = matches.get_flag("force");
     let output_path = matches
         .get_one::<String>("OUTPUT")
         .context("required OUTPUT argument not provided")?;
@@ -383,8 +466,7 @@ fn recover(matches: &ArgMatches) -> Result<(), Error> {
         stdout_writer = io::stdout();
         &mut stdout_writer
     } else {
-        file_writer = File::create(output_path)
-            .with_context(|| format!("failed to open output file '{}' for writing", output_path))?;
+        file_writer = create_secret_output_file(output_path, force)?;
         &mut file_writer
     };
 
@@ -398,6 +480,7 @@ fn recover(matches: &ArgMatches) -> Result<(), Error> {
 fn new_shards(
     new_shard_types: impl IntoIterator<Item = NewShardKind>,
     echo: bool,
+    force: bool,
 ) -> Result<(), Error> {
     let mut quorum = UntrustedQuorum::new();
     loop {
@@ -469,10 +552,10 @@ fn new_shards(
     for (document_id, shard_id, (shard, codewords)) in new_shards {
         (shard, codewords)
             .to_pdf()?
-            .save(&mut BufWriter::new(File::create(format!(
-                "key_shard-{}-{}.pdf",
-                document_id, shard_id
-            ))?))?;
+            .save(&mut BufWriter::new(create_output_file(
+                &format!("key_shard-{}-{}.pdf", document_id, shard_id),
+                force,
+            )?))?;
     }
 
     Ok(())
@@ -480,7 +563,7 @@ fn new_shards(
 
 // paperback-cli expand-shards --interactive -n <SHARDS>
 fn expand_shards_cli() -> Command {
-    add_echo_args(
+    add_force_arg(add_echo_args(
         Command::new("expand-shards")
             .about(r#"Create new key shards from a quorum of old key shards. The new key shards are separate to existing key shards, which means you are increasing the number of shards in circulation. This operation is recommended when you wish to add a new key shard holder to an existing quorum (and you are still confident that no more than N-1 shard holders will conspire against you)."#)
             .arg(Arg::new("interactive")
@@ -496,7 +579,7 @@ fn expand_shards_cli() -> Command {
                 .help(r#"Number of new shards to create."#)
                 .action(ArgAction::Set)
                 .required(true)),
-    )
+    ))
 }
 
 fn expand_shards(matches: &ArgMatches) -> Result<(), Error> {
@@ -508,12 +591,13 @@ fn expand_shards(matches: &ArgMatches) -> Result<(), Error> {
     new_shards(
         (0..num_new_shards).map(|_| NewShardKind::NewShard),
         resolve_echo(matches),
+        matches.get_flag("force"),
     )
 }
 
 // paperback-cli recreate-shards --interactive <SHARD-ID>...
 fn recreate_shards_cli() -> Command {
-    add_echo_args(
+    add_force_arg(add_echo_args(
         Command::new("recreate-shards")
             .about(r#"Re-create key shards with a given identifier from a quorum of old key shards. The re-created key shards are identical to the original versions of said key shards. This operation is recommended when one of the key shard holders lose their key shard and need a replacement (this ensures that they cannot fool you into getting an distinct new shard in addition to the original)."#)
             .arg(Arg::new("interactive")
@@ -532,7 +616,7 @@ fn recreate_shards_cli() -> Command {
                 })
                 .action(ArgAction::Append)
                 .required(true)),
-    )
+    ))
 }
 
 fn recreate_shards(matches: &ArgMatches) -> Result<(), Error> {
@@ -541,12 +625,16 @@ fn recreate_shards(matches: &ArgMatches) -> Result<(), Error> {
         .context("required shard id arguments not given")?
         .cloned()
         .map(NewShardKind::ExistingShard);
-    new_shards(new_shard_list, resolve_echo(matches))
+    new_shards(
+        new_shard_list,
+        resolve_echo(matches),
+        matches.get_flag("force"),
+    )
 }
 
 // paperback-cli reprint --interactive [--main-document|--shard]
 fn reprint_cli() -> Command {
-    add_echo_args(
+    add_force_arg(add_echo_args(
         Command::new("reprint")
             .about(r#""Re-print" a paperback document by generating a new PDF from an existing PDF."#)
             .arg(
@@ -579,13 +667,14 @@ fn reprint_cli() -> Command {
                 .long("print-data")
                 .help("When reprinting a main document, also print its encrypted QR payload to stdout. This is sensitive data -- only use this until PDF scanning is implemented and you need the text form back without a scanner. Has no effect with --shard.")
                 .action(ArgAction::SetTrue)),
-    )
+    ))
 }
 
 fn reprint(matches: &ArgMatches) -> Result<(), Error> {
     let interactive = matches.get_flag("interactive");
     ensure!(interactive, "PDF scanning not yet implemented");
     let echo = resolve_echo(matches);
+    let force = matches.get_flag("force");
 
     let mut main_document: MainDocument;
     let mut shard_pair: (EncryptedKeyShard, KeyShardCodewords);
@@ -629,8 +718,10 @@ fn reprint(matches: &ArgMatches) -> Result<(), Error> {
         _ => bail!("neither --shard nor --main-document type flags passed"),
     };
 
-    pdf.to_pdf()?
-        .save(&mut BufWriter::new(File::create(path_basename)?))?;
+    pdf.to_pdf()?.save(&mut BufWriter::new(create_output_file(
+        &path_basename,
+        force,
+    )?))?;
 
     match main_document_payload {
         Some(lines) => {
@@ -809,5 +900,77 @@ mod read_lines_until_blank_test {
     fn empty_input_yields_empty_string() {
         let result = read_lines_until_blank(lines_source(vec![None])).unwrap();
         assert_eq!(result, "");
+    }
+}
+
+#[cfg(test)]
+mod output_file_test {
+    // create_output_file()/create_secret_output_file() are the boundary
+    // every write site in this binary goes through: refusing to silently
+    // truncate an existing output file unless --force is given, and (for
+    // recovered-plaintext-secret sites) restricting the created file to
+    // mode 0600 on Unix instead of the process umask default.
+
+    use super::{create_output_file, create_secret_output_file};
+    use std::io::Write;
+
+    fn temp_file_path(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "paperback-main-test-{}-{}",
+            std::process::id(),
+            name
+        ));
+        path
+    }
+
+    #[test]
+    fn create_output_file_rejects_existing_without_force() {
+        let path = temp_file_path("rejects-existing");
+        std::fs::write(&path, b"pre-existing").unwrap();
+
+        let err = create_output_file(path.to_str().unwrap(), false).unwrap_err();
+        assert!(
+            err.to_string().contains("--force"),
+            "unexpected error message: {}",
+            err
+        );
+
+        // The pre-existing file must be untouched by the rejected attempt.
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"pre-existing");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn create_output_file_overwrites_with_force() {
+        let path = temp_file_path("overwrites-with-force");
+        std::fs::write(&path, b"pre-existing").unwrap();
+
+        let mut file = create_output_file(path.to_str().unwrap(), true).unwrap();
+        file.write_all(b"new content").unwrap();
+        drop(file);
+
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"new content");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn create_secret_output_file_sets_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_file_path("secret-mode-0600");
+        let _ = std::fs::remove_file(&path);
+
+        let file = create_secret_output_file(path.to_str().unwrap(), false).unwrap();
+        let mode = file.metadata().unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        drop(file);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

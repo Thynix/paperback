@@ -148,7 +148,7 @@ fn read_oneline_file(prompt: &str, path_or_stdin: &str) -> Result<String, Error>
 
 // paperback-cli raw restore --main-document <MAIN DOCUMENT> (--shards <SHARD>)... OUTPUT
 fn raw_restore_cli() -> Command {
-    crate::add_echo_args(
+    crate::add_force_arg(crate::add_echo_args(
         Command::new("restore")
             .about("Restore the secret data from a paperback backup.")
             .arg(
@@ -179,13 +179,14 @@ fn raw_restore_cli() -> Command {
                     .required(true)
                     .index(1),
             ),
-    )
+    ))
 }
 
 fn raw_restore(matches: &ArgMatches) -> Result<(), Error> {
     use paperback::{EncryptedKeyShard, FromWire, MainDocument, UntrustedQuorum};
 
     let echo = crate::resolve_echo(matches);
+    let force = matches.get_flag("force");
     let main_document_path = matches
         .get_one::<String>("main_document")
         .context("required --main-document argument not provided")?;
@@ -252,8 +253,7 @@ fn raw_restore(matches: &ArgMatches) -> Result<(), Error> {
         stdout_writer = io::stdout();
         &mut stdout_writer
     } else {
-        file_writer = File::create(output_path)
-            .with_context(|| format!("failed to open output file '{}' for writing", output_path))?;
+        file_writer = crate::create_secret_output_file(output_path, force)?;
         &mut file_writer
     };
 

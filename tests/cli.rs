@@ -173,6 +173,9 @@ fn reprint_print_data_flag_smoke() {
     assert!(!contains_long_digit_line(&stdout));
 
     // With --print-data: reprint must print the payload and warn on stderr.
+    // --force is needed here because this reprints the same main document a
+    // second time into the same directory, which would otherwise collide
+    // with the PDF the first reprint call above just wrote.
     let with_flag = run(
         &dir,
         &[
@@ -180,6 +183,7 @@ fn reprint_print_data_flag_smoke() {
             "--interactive",
             "--main-document",
             "--print-data",
+            "--force",
         ],
         Some(&stdin_data),
     );
@@ -274,6 +278,191 @@ fn recover_rejects_echo_and_no_echo_together() {
         "expected a clap argument-conflict message, got: {}",
         stderr
     );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Builds the same recover-interactive stdin shape used by
+/// `recover_interactive_accepts_piped_input_end_to_end`, for the --force /
+/// output-clobber tests below.
+fn build_recover_stdin(
+    main_document: &paperback_core::latest::MainDocument,
+    encrypted_shard: &paperback_core::latest::EncryptedKeyShard,
+    codewords: &paperback_core::latest::KeyShardCodewords,
+) -> String {
+    use paperback_core::latest::ToWire;
+
+    let main_document_lines = main_document
+        .debug_qr_data_strings()
+        .expect("main document qr strings");
+    let shard_multibase = encrypted_shard.to_wire_multibase(multibase::Base::Base32Z);
+    let codewords_line = codewords.join(" ");
+
+    let mut stdin_data = String::new();
+    for line in &main_document_lines {
+        stdin_data.push_str(line);
+        stdin_data.push_str("\n\n");
+    }
+    stdin_data.push_str(&shard_multibase);
+    stdin_data.push_str("\n\n");
+    stdin_data.push_str(&codewords_line);
+    stdin_data.push_str("\n\n");
+    stdin_data
+}
+
+/// `recover --interactive OUTPUT` must refuse to silently truncate an
+/// existing file at OUTPUT unless --force is given -- the pre-existing
+/// file's contents must be left untouched.
+#[test]
+fn recover_refuses_to_clobber_output_by_default() {
+    use paperback_core::latest as paperback;
+
+    let secret = b"a small secret for the no-clobber test".to_vec();
+    let backup = paperback::Backup::new(1, &secret).expect("create backup");
+    let main_document = backup.main_document().clone();
+    let shard = backup.next_shard().expect("create shard");
+    let (encrypted_shard, codewords) = shard.encrypt().expect("encrypt shard");
+    let stdin_data = build_recover_stdin(&main_document, &encrypted_shard, &codewords);
+
+    let dir = unique_temp_dir("recover-no-clobber");
+    let output_path = dir.join("existing.bin");
+    fs::write(&output_path, b"pre-existing content").expect("write pre-existing output file");
+
+    let output = run(
+        &dir,
+        &[
+            "recover",
+            "--interactive",
+            output_path.to_str().expect("output path is valid UTF-8"),
+        ],
+        Some(&stdin_data),
+    );
+    assert!(
+        !output.status.success(),
+        "recover should refuse to overwrite an existing output file: {:?}",
+        output
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("already exists") && stderr.contains("--force"),
+        "expected an already-exists/--force error, got: {}",
+        stderr
+    );
+
+    let contents = fs::read(&output_path).expect("read output file");
+    assert_eq!(contents, b"pre-existing content");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Same setup as above, but with --force: the pre-existing file must be
+/// overwritten with the recovered secret, and (on Unix) end up restricted to
+/// mode 0600 even though it pre-existed with default-umask permissions --
+/// exercising the case where `--force` truncates an existing inode in place
+/// rather than creating a fresh one, where `OpenOptions::mode()` alone would
+/// not apply.
+#[test]
+fn recover_force_flag_overwrites() {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    use paperback_core::latest as paperback;
+
+    let secret = b"a small secret for the force-overwrite test".to_vec();
+    let backup = paperback::Backup::new(1, &secret).expect("create backup");
+    let main_document = backup.main_document().clone();
+    let shard = backup.next_shard().expect("create shard");
+    let (encrypted_shard, codewords) = shard.encrypt().expect("encrypt shard");
+    let stdin_data = build_recover_stdin(&main_document, &encrypted_shard, &codewords);
+
+    let dir = unique_temp_dir("recover-force-overwrite");
+    let output_path = dir.join("existing.bin");
+    fs::write(&output_path, b"pre-existing content").expect("write pre-existing output file");
+
+    let output = run(
+        &dir,
+        &[
+            "recover",
+            "--interactive",
+            "--force",
+            output_path.to_str().expect("output path is valid UTF-8"),
+        ],
+        Some(&stdin_data),
+    );
+    assert!(
+        output.status.success(),
+        "recover --force should overwrite an existing output file: {:?}",
+        output
+    );
+
+    let contents = fs::read(&output_path).expect("read output file");
+    assert_eq!(contents, secret);
+
+    #[cfg(unix)]
+    {
+        let mode = fs::metadata(&output_path)
+            .expect("stat output file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "expected mode 0600, got {:o}", mode);
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// `raw restore`'s output file is a recovered plaintext secret, so it must
+/// be created with mode 0600 rather than inheriting the process umask.
+#[cfg(unix)]
+#[test]
+fn raw_restore_output_has_0600_permissions() {
+    use paperback_core::latest::{self as paperback, ToWire};
+    use std::os::unix::fs::PermissionsExt;
+
+    let secret = b"a small secret for the raw restore permissions test".to_vec();
+    let backup = paperback::Backup::new(1, &secret).expect("create backup");
+    let main_document = backup.main_document().clone();
+    let shard = backup.next_shard().expect("create shard");
+    let (encrypted_shard, codewords) = shard.encrypt().expect("encrypt shard");
+
+    let dir = unique_temp_dir("raw-restore-perms");
+    let main_document_path = dir.join("main_document.txt");
+    let shard_path = dir.join("shard.txt");
+    fs::write(
+        &main_document_path,
+        main_document.to_wire_multibase(multibase::Base::Base32Z),
+    )
+    .expect("write main document file");
+    fs::write(
+        &shard_path,
+        encrypted_shard.to_wire_multibase(multibase::Base::Base32Z),
+    )
+    .expect("write shard file");
+
+    let output_path = dir.join("recovered.bin");
+    let codewords_line = format!("{}\n", codewords.join(" "));
+
+    let output = run(
+        &dir,
+        &[
+            "raw",
+            "restore",
+            "-M",
+            main_document_path.to_str().expect("path is valid UTF-8"),
+            "-s",
+            shard_path.to_str().expect("path is valid UTF-8"),
+            output_path.to_str().expect("path is valid UTF-8"),
+        ],
+        Some(&codewords_line),
+    );
+    assert!(output.status.success(), "raw restore failed: {:?}", output);
+
+    let mode = fs::metadata(&output_path)
+        .expect("stat output file")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "expected mode 0600, got {:o}", mode);
 
     let _ = fs::remove_dir_all(&dir);
 }
