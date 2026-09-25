@@ -481,7 +481,10 @@ impl Quorum {
 mod test {
     use super::*;
 
-    use crate::{shamir::Error as ShamirError, v0::Backup};
+    use crate::{
+        shamir::Error as ShamirError,
+        v0::{Backup, ToWire},
+    };
 
     #[test]
     fn quorum_new_shard_wrong_count_no_main_document_returns_err() {
@@ -507,6 +510,95 @@ mod test {
                 needed: 3,
                 given: 2
             }))
+        ));
+    }
+
+    #[test]
+    fn quorum_validate_rejects_forged_key_shard() {
+        // Corrupting the last byte of an otherwise well-formed key shard
+        // invalidates its Ed25519 signature without touching any
+        // structurally-checked field (version, doc checksum), turning it
+        // into a `Type::ForgedKeyShard` once wire-parsed. validate() must
+        // reject a quorum containing one instead of silently accepting it
+        // -- this is exactly the "malicious shard holder supplies a forged
+        // shard" case DESIGN.md's threat model assumes.
+        let backup = Backup::new(2, b"some secret").unwrap();
+        let shard = backup.next_shard().unwrap();
+        let mut bytes = shard.to_wire();
+        *bytes.last_mut().unwrap() ^= 0xff;
+        let forged = KeyShard::from_wire(bytes).unwrap();
+
+        let mut quorum = UntrustedQuorum::new();
+        quorum.push_shard(forged);
+
+        let err = quorum.validate().unwrap_err();
+        assert!(err.message.contains("forged"));
+    }
+
+    #[test]
+    fn quorum_validate_rejects_inconsistent_shard_groups() {
+        // Shards from two unrelated backups pushed into the same quorum
+        // must not be silently mixed together: validate() groups documents
+        // by their (version, doc checksum, quorum size, public key)
+        // identity, and more than one resulting group is rejected.
+        let backup_a = Backup::new(2, b"secret a").unwrap();
+        let backup_b = Backup::new(2, b"secret b").unwrap();
+
+        let mut quorum = UntrustedQuorum::new();
+        quorum.push_shard(backup_a.next_shard().unwrap());
+        quorum.push_shard(backup_b.next_shard().unwrap());
+
+        assert!(quorum.validate().is_err());
+    }
+
+    #[test]
+    fn quorum_validate_rejects_insufficient_shards_with_main_document() {
+        // Two of three required shards, plus the main document: caught by
+        // UntrustedQuorum's own quorum-size check, distinct from the
+        // Dealer::recover backstop exercised by the no-main-document test
+        // above (that check only runs once a main document is present).
+        let backup = Backup::new(3, b"some secret").unwrap();
+        let mut quorum = UntrustedQuorum::new();
+        quorum.main_document(backup.main_document().clone());
+        for _ in 0..2 {
+            quorum.push_shard(backup.next_shard().unwrap());
+        }
+
+        let err = quorum.validate().unwrap_err();
+        assert!(err.message.contains("quorum size required"));
+    }
+
+    #[test]
+    fn quorum_recover_document_without_main_document_returns_err() {
+        let backup = Backup::new(2, b"some secret").unwrap();
+        let mut quorum = UntrustedQuorum::new();
+        for _ in 0..2 {
+            quorum.push_shard(backup.next_shard().unwrap());
+        }
+        let quorum = quorum.validate().unwrap();
+
+        assert!(matches!(
+            quorum.recover_document(),
+            Err(Error::MissingCapability(_))
+        ));
+    }
+
+    #[test]
+    fn quorum_new_shard_sealed_document_returns_err() {
+        // A sealed backup has no id_keypair, so minting a new shard from a
+        // fully-assembled quorum must fail cleanly rather than unwrapping a
+        // `None`.
+        let backup = Backup::new_sealed(2, b"some secret").unwrap();
+        let mut quorum = UntrustedQuorum::new();
+        quorum.main_document(backup.main_document().clone());
+        for _ in 0..2 {
+            quorum.push_shard(backup.next_shard().unwrap());
+        }
+        let quorum = quorum.validate().unwrap();
+
+        assert!(matches!(
+            quorum.new_shard(NewShardKind::NewShard),
+            Err(Error::MissingCapability(_))
         ));
     }
 }
