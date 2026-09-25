@@ -825,3 +825,47 @@ impl ToPdf for (EncryptedKeyShard, KeyShardCodewords) {
         (shard, codewords).to_pdf()
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    use crate::v0::Backup;
+
+    #[test]
+    fn main_document_to_pdf_succeeds_for_small_secret() {
+        let backup = Backup::new(2, b"a small secret").unwrap();
+        assert!(backup.main_document().to_pdf().is_ok());
+    }
+
+    #[test]
+    fn main_document_to_pdf_rejects_secret_exceeding_qr_budget() {
+        // Only 9 QR codes fit on a main document page (see `TooManyCodes`
+        // above). A secret large enough to need a 10th code must be
+        // rejected with a clean error -- not a panic on the QR layout loop,
+        // and not a silently truncated document.
+        let huge_secret = vec![0u8; 64 * 1024];
+        let backup = Backup::new(2, &huge_secret).unwrap();
+        assert!(matches!(
+            backup.main_document().to_pdf(),
+            Err(Error::TooManyCodes(_))
+        ));
+    }
+
+    #[test]
+    fn key_shard_to_pdf_rejects_wrong_codewords() {
+        // to_pdf() decrypts the shard up front (to read its id/document id
+        // for the header text). Wrong codewords -- e.g. a mistyped or
+        // forgotten codeword during a reprint ceremony -- must surface as
+        // an Error, not a panic or garbage header text.
+        let backup = Backup::new(2, b"some secret").unwrap();
+        let shard = backup.next_shard().unwrap();
+        let (encrypted, _codewords) = shard.encrypt().unwrap();
+        let wrong_codewords: KeyShardCodewords = vec!["wrong".to_string(), "words".to_string()];
+
+        assert!(matches!(
+            (&encrypted, &wrong_codewords).to_pdf(),
+            Err(Error::OtherError(_))
+        ));
+    }
+}
