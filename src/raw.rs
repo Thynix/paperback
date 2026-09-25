@@ -380,3 +380,56 @@ pub(crate) fn subcommands() -> Command {
             // paperback-cli raw expand --new-shards <N> (--shards <SHARD>)...
             .subcommand(raw_expand_cli())
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    // read_oneline_file() is the boundary this module uses to pull main
+    // document / shard text off disk (or stdin) -- exactly the "human typed
+    // or scanned it in from paper" path AGENTS.md calls out. Malformed
+    // input here (an empty file, a missing file) must return an `Err`, not
+    // panic.
+
+    fn temp_file_path(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "paperback-raw-test-{}-{}",
+            std::process::id(),
+            name
+        ));
+        path
+    }
+
+    fn write_temp_file(name: &str, contents: &[u8]) -> std::path::PathBuf {
+        let path = temp_file_path(name);
+        File::create(&path).unwrap().write_all(contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn read_oneline_file_rejects_empty_file() {
+        let path = write_temp_file("empty", b"");
+        let result = read_oneline_file("test", path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_oneline_file_rejects_missing_file() {
+        let path = temp_file_path("does-not-exist");
+        let _ = std::fs::remove_file(&path); // just in case a previous run left it behind
+
+        assert!(read_oneline_file("test", path.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn read_oneline_file_reads_first_line_only() {
+        let path = write_temp_file("multiline", b"first line\nsecond line\n");
+        let result = read_oneline_file("test", path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(result.unwrap(), "first line");
+    }
+}
