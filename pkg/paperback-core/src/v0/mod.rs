@@ -22,7 +22,7 @@ use crate::{
 };
 
 use aead::{Aead, AeadCore};
-use bip39::{Language, Mnemonic};
+use bip39::{Language, Mnemonic, MnemonicType};
 use chacha20poly1305::ChaCha20Poly1305;
 use crypto_common::KeyInit;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -256,12 +256,31 @@ impl EncryptedKeyShard {
 
     pub fn decrypt<A: AsRef<[String]>>(&self, codewords: A) -> Result<KeyShard, String> {
         // Convert BIP-39 mnemonic to a key.
-        let phrase = codewords.as_ref().join(" ").to_lowercase();
+        let codewords = codewords.as_ref();
+        let phrase = codewords.join(" ").to_lowercase();
         let mnemonic =
             Mnemonic::from_phrase(&phrase, CODEWORD_LANGUAGE).map_err(|e| format!("{:?}", e))?; // XXX: Ugly, fix this.
 
+        // tiny-bip39 happily parses any standard BIP-39 phrase length (12, 15,
+        // 18, 21, or 24 words -- 16/20/24/28/32 bytes of entropy
+        // respectively), but paperback only ever generates 24-word phrases
+        // (32 bytes of entropy). Reject anything else here: the entropy is
+        // about to be copied into a fixed 32-byte key buffer, and doing that
+        // with a shorter slice would panic instead of erroring out on
+        // attacker- or typo-controlled input.
+        let entropy = mnemonic.entropy();
+        if entropy.len() != CHACHAPOLY_KEY_LENGTH {
+            return Err(format!(
+                "expected a {}-word recovery phrase ({} bytes of entropy) but got {} words ({} bytes) -- did you enter all of the codewords correctly?",
+                MnemonicType::Words24.word_count(),
+                CHACHAPOLY_KEY_LENGTH,
+                codewords.len(),
+                entropy.len(),
+            ));
+        }
+
         let mut shard_key = ChaChaPolyKey::default();
-        shard_key.copy_from_slice(mnemonic.entropy());
+        shard_key.copy_from_slice(entropy);
 
         // Decrypt the contents.
         let aead = ChaCha20Poly1305::new(&shard_key);
@@ -640,6 +659,67 @@ mod test {
         let (enc_shard, codewords) = shard.clone().encrypt().unwrap();
         let shard2 = enc_shard.decrypt(codewords).unwrap();
         shard == shard2
+    }
+
+    // Build codewords for a BIP-39 phrase of the given standard entropy size
+    // (16, 20, 24, 28, or 32 bytes), independent of anything paperback itself
+    // generates.
+    fn codewords_for_entropy_len(entropy_len: usize) -> Vec<String> {
+        let mut entropy = vec![0u8; entropy_len];
+        rand::thread_rng().fill_bytes(&mut entropy[..]);
+        let phrase = Mnemonic::from_entropy(&entropy, CODEWORD_LANGUAGE)
+            .unwrap()
+            .into_phrase();
+        phrase.split_whitespace().map(str::to_owned).collect()
+    }
+
+    // A ciphertext body is irrelevant to these tests -- decrypt() must reject
+    // the mnemonic itself before ever reaching AEAD decryption.
+    fn dummy_encrypted_shard() -> EncryptedKeyShard {
+        EncryptedKeyShard {
+            nonce: ChaChaPolyNonce::default(),
+            ciphertext: vec![0u8; 32],
+        }
+    }
+
+    #[test]
+    fn decrypt_wrong_length_mnemonic_returns_err() {
+        // A 12-word BIP-39 phrase (128 bits / 16 bytes of entropy) is valid
+        // BIP-39, but is not the 24-word/32-byte-entropy shape that
+        // EncryptedKeyShard::encrypt() always produces. This used to panic
+        // in decrypt() via a length-mismatched copy_from_slice(); it must now
+        // return Err(_) instead of aborting the process.
+        let codewords = codewords_for_entropy_len(16);
+        assert!(dummy_encrypted_shard().decrypt(codewords).is_err());
+    }
+
+    #[test]
+    fn decrypt_non24_word_mnemonics_return_err() {
+        // Every standard BIP-39 length other than 24 words must be rejected,
+        // not just the shortest one.
+        for mtype in [
+            MnemonicType::Words12,
+            MnemonicType::Words15,
+            MnemonicType::Words18,
+            MnemonicType::Words21,
+        ] {
+            let codewords = codewords_for_entropy_len(mtype.entropy_bits() / 8);
+            assert!(
+                dummy_encrypted_shard().decrypt(codewords).is_err(),
+                "a {}-word mnemonic must be rejected rather than accepted or panic",
+                mtype.word_count(),
+            );
+        }
+    }
+
+    #[test]
+    fn decrypt_24_word_wrong_mnemonic_still_handled() {
+        // A 24-word phrase that is valid BIP-39 (32 bytes of entropy) but is
+        // not the actual shard key must still fail gracefully at the
+        // AEAD-decrypt step -- a regression guard that the entropy-length
+        // check above doesn't disturb this existing error path.
+        let codewords = codewords_for_entropy_len(32);
+        assert!(dummy_encrypted_shard().decrypt(codewords).is_err());
     }
 
     #[quickcheck]
