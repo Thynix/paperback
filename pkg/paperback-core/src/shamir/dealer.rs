@@ -22,18 +22,41 @@ use crate::shamir::{
     Error,
 };
 
-use std::mem;
+use std::{fmt, mem};
 
 use rayon::prelude::*;
+use zeroize::Zeroizing;
 
 /// Factory to share a secret using [Shamir Secret Sharing][sss].
 ///
 /// [sss]: https://en.wikipedia.org/wiki/Shamir%27s_Secret_Sharing
-#[derive(Clone, Debug)]
+///
+/// `Clone` is kept (rather than dropped as a hardening measure) because
+/// `v0::recover::Quorum` derives `Clone` over a `OnceCell<Dealer>` field, and
+/// `once_cell::unsync::OnceCell<T>: Clone` requires `T: Clone`. A cloned
+/// `Dealer` is not left unprotected: every `polys` entry is a boxed
+/// `GfPolynomial`, whose constant term is a fragment of the secret being
+/// sharded, and `GfPolynomial` itself is `ZeroizeOnDrop` -- so the clone's
+/// coefficients are independently zeroized when that clone is dropped, same
+/// as the original's.
+///
+/// `Debug` is implemented manually below (rather than derived) so that a
+/// stray `{:?}` cannot leak the secret through `polys`.
+#[derive(Clone)]
 pub struct Dealer {
     polys: Vec<Box<dyn EvaluablePolynomial>>,
     secret_len: usize,
     threshold: GfElemPrimitive,
+}
+
+impl fmt::Debug for Dealer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Dealer")
+            .field("threshold", &self.threshold)
+            .field("secret_len", &self.secret_len)
+            .field("polys", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Dealer {
@@ -71,13 +94,20 @@ impl Dealer {
     }
 
     /// Get the secret value stored by the `Dealer`.
-    pub fn secret(&self) -> Vec<u8> {
-        let mut secret = self
-            .polys
-            .par_iter()
-            .map(|poly| poly.constant())
-            .flat_map(|x| x.to_bytes())
-            .collect::<Vec<_>>();
+    ///
+    /// Wrapped in `Zeroizing` so the caller's copy is cleared on drop. The
+    /// intermediate buffer is constructed as `Zeroizing` from the start (not
+    /// just at the end) so that the untruncated tail -- the padding bytes
+    /// beyond `secret_len` from the last polynomial's constant term -- is
+    /// also zeroized, not merely dropped as an ordinary `Vec<u8>` would be.
+    pub fn secret(&self) -> Zeroizing<Vec<u8>> {
+        let mut secret = Zeroizing::new(
+            self.polys
+                .par_iter()
+                .map(|poly| poly.constant())
+                .flat_map(|x| x.to_bytes())
+                .collect::<Vec<_>>(),
+        );
 
         // Cannot call .take() on rayon::iter::FlatMap, so do it the
         // old-fashioned way instead.
@@ -226,6 +256,40 @@ mod test {
         ));
     }
 
+    #[test]
+    fn dealer_debug_is_redacted() {
+        let secret = b"correct horse battery staple".to_vec();
+        let dealer = Dealer::new(3, &secret).unwrap();
+
+        let debug_str = format!("{:?}", dealer);
+        assert!(
+            !debug_str.contains("correct horse battery staple"),
+            "Dealer Debug output must not leak the secret, got: {}",
+            debug_str
+        );
+        assert!(debug_str.contains("redacted"));
+        // Non-secret metadata is still useful in the redacted output.
+        assert!(debug_str.contains("threshold"));
+        assert!(debug_str.contains("secret_len"));
+    }
+
+    #[test]
+    fn dealer_secret_returns_zeroizing_wrapper() {
+        // Type-level assertion (only compiles if Dealer::secret() returns
+        // Zeroizing<Vec<u8>>): asserts the API contract that the caller's
+        // copy of the secret is scrubbed from memory when dropped.
+        //
+        // Actual zeroization-on-drop is not directly observable from safe
+        // Rust (inspecting memory after drop needs a raw-pointer read of a
+        // dangling pointer, which is unsafe and thus off-limits in this
+        // crate: see `#![forbid(unsafe_code)]` in lib.rs). We rely instead
+        // on `zeroize`'s own test suite for that guarantee, and check here
+        // only that this crate actually asks for it via the type system.
+        let dealer = Dealer::new(1, b"secret").unwrap();
+        let secret: zeroize::Zeroizing<Vec<u8>> = dealer.secret();
+        assert_eq!(secret.as_slice(), b"secret");
+    }
+
     fn dummy_shard(x: u32, ys_len: usize, threshold: u32, secret_len: usize) -> Shard {
         Shard {
             x: GfElem::from_inner(x),
@@ -313,7 +377,7 @@ mod test {
             return TestResult::discard();
         }
         let dealer = Dealer::new(n.into(), &secret).unwrap();
-        TestResult::from_bool(secret == dealer.secret())
+        TestResult::from_bool(secret == *dealer.secret())
     }
 
     #[cfg(debug_assertions)] // not --release
@@ -343,7 +407,7 @@ mod test {
             })
             .collect::<Vec<_>>();
 
-        TestResult::from_bool(Dealer::recover(shards).unwrap().secret() != secret)
+        TestResult::from_bool(*Dealer::recover(shards).unwrap().secret() != secret)
     }
 
     #[quickcheck]
@@ -367,7 +431,7 @@ mod test {
             })
             .collect::<Vec<_>>();
 
-        TestResult::from_bool(Dealer::recover(shards).unwrap().secret() == secret)
+        TestResult::from_bool(*Dealer::recover(shards).unwrap().secret() == secret)
     }
 
     #[cfg(debug_assertions)] // not --release

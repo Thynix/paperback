@@ -95,6 +95,8 @@ fn raw_backup(matches: &ArgMatches) -> Result<(), Error> {
     buffer_input
         .read_to_end(&mut secret)
         .with_context(|| format!("failed to read secret data from '{}'", input_path))?;
+    // Zeroized on drop, since this holds the plaintext being backed up.
+    let secret = zeroize::Zeroizing::new(secret);
 
     let backup = if sealed {
         Backup::new_sealed(quorum_size, &secret)
@@ -223,12 +225,17 @@ fn raw_restore(matches: &ArgMatches) -> Result<(), Error> {
         }
         print!("Shard {} Codeword: ", idx + 1);
         io::stdout().flush()?;
-        let codeword_input = crate::read_secret_line(echo)?.unwrap_or_default();
+        // Zeroized on drop: typed-in codewords are secret material used
+        // only to decrypt this shard, and are not needed again afterwards.
+        let codeword_input =
+            zeroize::Zeroizing::new(crate::read_secret_line(echo)?.unwrap_or_default());
 
-        let codewords = codeword_input
-            .split_whitespace()
-            .map(|s| s.to_owned())
-            .collect::<Vec<_>>();
+        let codewords = zeroize::Zeroizing::new(
+            codeword_input
+                .split_whitespace()
+                .map(|s| s.to_owned())
+                .collect::<Vec<_>>(),
+        );
         let shard = encrypted_shard
             .decrypt(&codewords)
             .map_err(|err| anyhow!(err)) // TODO: Fix this once FromWire supports non-String errors.
@@ -318,12 +325,17 @@ fn raw_expand(matches: &ArgMatches) -> Result<(), Error> {
         }
         print!("Shard {} Codeword: ", idx + 1);
         io::stdout().flush()?;
-        let codeword_input = crate::read_secret_line(echo)?.unwrap_or_default();
+        // Zeroized on drop: typed-in codewords are secret material used
+        // only to decrypt this shard, and are not needed again afterwards.
+        let codeword_input =
+            zeroize::Zeroizing::new(crate::read_secret_line(echo)?.unwrap_or_default());
 
-        let codewords = codeword_input
-            .split_whitespace()
-            .map(|s| s.to_owned())
-            .collect::<Vec<_>>();
+        let codewords = zeroize::Zeroizing::new(
+            codeword_input
+                .split_whitespace()
+                .map(|s| s.to_owned())
+                .collect::<Vec<_>>(),
+        );
 
         let shard = encrypted_shard
             .decrypt(&codewords)

@@ -22,11 +22,16 @@ use crate::{
 };
 
 use unsigned_varint::{encode as varuint_encode, nom as varuint_nom};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Piece of a secret which has been sharded with [Shamir Secret Sharing][sss].
 ///
 /// [sss]: https://en.wikipedia.org/wiki/Shamir%27s_Secret_Sharing
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// `ys` holds this shard's evaluated polynomial values, which become
+/// sensitive once `k-1` other shards are also known (they are then enough to
+/// recover the secret), so the shard is zeroized on drop.
+#[derive(Clone, Debug, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct Shard {
     pub(super) x: GfElem,
     pub(super) ys: Vec<GfElem>,

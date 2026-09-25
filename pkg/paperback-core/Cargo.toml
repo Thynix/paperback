@@ -50,6 +50,7 @@ thiserror = "^2"
 tiny-bip39 = "^2"
 typenum = "^1"
 unsigned-varint = { version = "^0.7", features = ["nom"] }
+zeroize = { version = "^1.8", features = ["derive"] }
 
 [features]
 donotuse_expose_internal_modules = []

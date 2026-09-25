@@ -46,6 +46,7 @@ clap = { version = "^4", features = ["wrap_help"] }
 anyhow = "^1"
 multibase = "^0.9"
 rpassword = "^7"
+zeroize = "^1.8"
 
 [patch.crates-io]
 # See <https://github.com/paritytech/unsigned-varint/pull/54>.

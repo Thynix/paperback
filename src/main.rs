@@ -204,6 +204,8 @@ fn backup(matches: &ArgMatches) -> Result<(), Error> {
     buffer_input
         .read_to_end(&mut secret)
         .with_context(|| format!("failed to read secret data from '{}'", input_path))?;
+    // Zeroized on drop, since this holds the plaintext being backed up.
+    let secret = zeroize::Zeroizing::new(secret);
 
     let backup = if sealed {
         Backup::new_sealed(quorum_size, &secret)
@@ -439,7 +441,12 @@ fn recover(matches: &ArgMatches) -> Result<(), Error> {
             encrypted_shard.checksum_string()
         );
 
-        let codewords = read_codewords(format!("Enter key shard {} codewords", idx + 1), echo)?;
+        // Zeroized on drop: typed-in codewords are secret material used only
+        // to decrypt this shard, and are not needed again afterwards.
+        let codewords = zeroize::Zeroizing::new(read_codewords(
+            format!("Enter key shard {} codewords", idx + 1),
+            echo,
+        )?);
         let shard = encrypted_shard
             .decrypt(&codewords)
             .map_err(|err| anyhow!(err)) // TODO: Fix this once FromWire supports non-String errors.
@@ -511,7 +518,12 @@ fn new_shards(
             encrypted_shard.checksum_string()
         );
 
-        let codewords = read_codewords(format!("Enter key shard {} codewords", idx + 1), echo)?;
+        // Zeroized on drop: typed-in codewords are secret material used only
+        // to decrypt this shard, and are not needed again afterwards.
+        let codewords = zeroize::Zeroizing::new(read_codewords(
+            format!("Enter key shard {} codewords", idx + 1),
+            echo,
+        )?);
         let shard = encrypted_shard
             .decrypt(&codewords)
             .map_err(|err| anyhow!(err)) // TODO: Fix this once FromWire supports non-String errors.

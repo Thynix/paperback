@@ -23,6 +23,7 @@ use std::{
 
 use itertools::Itertools;
 use rand::{CryptoRng, RngCore};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -49,7 +50,13 @@ pub type GfElemPrimitive = u32;
 /// implementations of `GF(2^n)` fields (and `GF(2^8)` is not suitable for our
 /// purposes).
 // NOTE: PartialEq is not timing-safe.
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+//
+// GfElem is Copy (and thus cannot itself implement Drop), so it only derives
+// Zeroize -- not ZeroizeOnDrop. That lets containers of GfElem (such as
+// GfPolynomial's coefficients or a Shard's y-values) zeroize their backing
+// Vec on drop, which is where the actual heap allocation -- and thus the
+// only memory worth clearing -- lives.
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, Zeroize)]
 pub struct GfElem(GfElemPrimitive);
 
 /// (x, y) in GF.
@@ -379,8 +386,22 @@ impl Clone for Box<dyn EvaluablePolynomial> {
 
 /// A polynomial in `GF(2^32)`.
 // The coefficients are in *increasing* degree (x^0, x^1, ..., x^n).
-#[derive(Clone, Debug, PartialEq, Eq)]
+//
+// The constant term (index 0) is a fragment of the secret being sharded (see
+// Dealer::new), so the coefficients are zeroized on drop, and Debug is
+// implemented manually below rather than derived, so that a stray `{:?}`
+// cannot leak them.
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct GfPolynomial(Vec<GfElem>);
+
+impl fmt::Debug for GfPolynomial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GfPolynomial")
+            .field("degree", &self.0.len().saturating_sub(1))
+            .field("coefficients", &"<redacted>")
+            .finish()
+    }
+}
 
 impl GfPolynomial {
     pub fn new_rand<R: CryptoRng + RngCore + ?Sized>(n: GfElemPrimitive, r: &mut R) -> Self {
@@ -724,6 +745,22 @@ mod test {
 
     use quickcheck::TestResult;
     use rand::rngs::OsRng;
+
+    #[test]
+    fn gf_polynomial_debug_is_redacted() {
+        // A distinctive constant term (a fragment of some hypothetical
+        // secret) that must not show up verbatim in Debug output.
+        let secret_marker = GfElem::from_inner(0xDEAD_BEEF);
+        let poly = GfPolynomial(vec![secret_marker, GfElem::from_inner(1)]);
+
+        let debug_str = format!("{:?}", poly);
+        assert!(
+            !debug_str.contains("3735928559") && !debug_str.to_lowercase().contains("deadbeef"),
+            "GfPolynomial Debug output must not leak coefficient values, got: {}",
+            debug_str
+        );
+        assert!(debug_str.contains("redacted"));
+    }
 
     #[test]
     fn try_from_bytes_exactly_four_bytes_ok() {
