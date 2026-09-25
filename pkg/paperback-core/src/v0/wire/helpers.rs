@@ -42,7 +42,16 @@ pub(super) fn multihash(input: &[u8]) -> IResult<&[u8], Multihash> {
     // The length doesn't include the (type, length) prefix, so calculate that
     // based on the partially-parsed input. We return an Incomplete if there
     // isn't enough bytes for the hash (split_at would panic otherwise).
-    let length = length + (input.len() - partial.len());
+    //
+    // `length` is an attacker-controlled digest-size varint and can be as
+    // large as u64::MAX (or usize::MAX), so the addition below must be
+    // checked -- a wrapping overflow could produce a small `length` that
+    // slips past the `length > input.len()` guard below with a bogus split
+    // point instead of being rejected as absurdly large.
+    let prefix_len = input.len() - partial.len();
+    let length = length
+        .checked_add(prefix_len)
+        .ok_or_else(|| NomErr::Error(NomError::new(input, ErrorKind::TooLarge)))?;
     if length > input.len() {
         return Err(NomErr::Incomplete(Needed::new(length - input.len())));
     }
@@ -151,4 +160,54 @@ pub(super) fn take_chachapoly_ciphertext(input: &[u8]) -> IResult<&[u8], &[u8]> 
     let (input, length) = varuint_nom::usize(input)?;
 
     take(length)(input)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use unsigned_varint::encode as varuint_encode;
+
+    // Builds a `(type, length)` multihash prefix, as decoded by `multihash()`,
+    // followed by `trailing` extra bytes standing in for the (possibly
+    // truncated) digest.
+    fn multihash_prefix(type_: u64, length: usize, trailing: usize) -> Vec<u8> {
+        let mut buffer = varuint_encode::u64(type_, &mut varuint_encode::u64_buffer()).to_vec();
+        buffer.extend_from_slice(varuint_encode::usize(
+            length,
+            &mut varuint_encode::usize_buffer(),
+        ));
+        buffer.extend(std::iter::repeat_n(0u8, trailing));
+        buffer
+    }
+
+    #[test]
+    fn multihash_length_overflow_returns_err() {
+        // A minimal LEB128 encoding of usize::MAX is legal varint input, but
+        // adding the (type, length) prefix length to it must not silently
+        // wrap around to something smaller than the remaining input.
+        let input = multihash_prefix(0, usize::MAX, 4);
+        assert!(multihash(&input).is_err());
+    }
+
+    #[test]
+    fn multihash_length_overflow_no_panic_under_overflow_checks() {
+        // A length that isn't quite usize::MAX, combined with a prefix long
+        // enough to push the sum past usize::MAX, must also be rejected
+        // cleanly rather than panicking (debug/test builds have
+        // overflow-checks on) or wrapping (release builds).
+        let input = multihash_prefix(u64::MAX, usize::MAX - 5, 4);
+        assert!(multihash(&input).is_err());
+    }
+
+    #[test]
+    fn multihash_oversized_but_no_overflow_returns_incomplete() {
+        // A length that is legitimately larger than the remaining input, but
+        // far below the overflow boundary, must still be treated as
+        // "not enough bytes yet" rather than an error.
+        let input = multihash_prefix(0, 1_000_000, 4);
+        assert!(matches!(
+            multihash(&input),
+            Err(NomErr::Incomplete(Needed::Size(_)))
+        ));
+    }
 }
