@@ -30,7 +30,7 @@ fn benchmark_dealer_next_shard(c: &mut Criterion) {
             .sample_iter(Standard)
             .take(1 << 12)
             .collect::<Vec<u8>>();
-        let dealer = Dealer::new(quorum_size, &vec);
+        let dealer = Dealer::new(quorum_size, &vec).unwrap();
         group.measurement_time(Duration::new(60, 0));
         group.throughput(Throughput::Bytes(vec.len() as u64));
         group.bench_with_input(format!("N={:03}", quorum_size), &dealer, |b, dealer| {
@@ -47,7 +47,7 @@ fn benchmark_recover_secret(c: &mut Criterion) {
             .sample_iter(Standard)
             .take(1 << 12)
             .collect::<Vec<u8>>();
-        let dealer = Dealer::new(quorum_size, &vec);
+        let dealer = Dealer::new(quorum_size, &vec).unwrap();
         let shards = (0..quorum_size)
             .map(|_| dealer.next_shard())
             .collect::<Vec<_>>();

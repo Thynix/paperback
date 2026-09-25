@@ -46,8 +46,10 @@ impl Dealer {
 
     /// Construct a new `Dealer` to shard the `secret`, requiring at least
     /// `threshold` shards to reconstruct the secret.
-    pub fn new<B: AsRef<[u8]>>(threshold: u32, secret: B) -> Self {
-        assert!(threshold > 0, "must at least have a threshold of one");
+    pub fn new<B: AsRef<[u8]>>(threshold: u32, secret: B) -> Result<Self, Error> {
+        if threshold == 0 {
+            return Err(Error::ZeroThreshold);
+        }
         let k = threshold - 1;
         let secret = secret.as_ref();
         let polys = secret
@@ -61,11 +63,11 @@ impl Dealer {
                 Box::new(poly) as Box<dyn EvaluablePolynomial>
             })
             .collect::<Vec<_>>();
-        Dealer {
+        Ok(Dealer {
             polys,
             threshold,
             secret_len: secret.len(),
-        }
+        })
     }
 
     /// Get the secret value stored by the `Dealer`.
@@ -192,12 +194,20 @@ mod test {
     // ridiculously large quorum sizes in quickcheck tests. Some larger quorums
     // are tested in v0::test::paperback_expand_smoke.
 
+    #[test]
+    fn zero_threshold_is_error() {
+        assert!(matches!(
+            Dealer::new(0u32, [1, 2, 3]),
+            Err(Error::ZeroThreshold)
+        ));
+    }
+
     #[quickcheck]
     fn basic_roundtrip(n: u16, secret: Vec<u8>) -> TestResult {
         if !(1..=4096).contains(&n) {
             return TestResult::discard();
         }
-        let dealer = Dealer::new(n.into(), &secret);
+        let dealer = Dealer::new(n.into(), &secret).unwrap();
         TestResult::from_bool(secret == dealer.secret())
     }
 
@@ -217,7 +227,7 @@ mod test {
             return TestResult::discard();
         }
 
-        let dealer = Dealer::new(n.into(), &secret);
+        let dealer = Dealer::new(n.into(), &secret).unwrap();
         let shards = (0..(n - 1))
             .map(|_| {
                 let mut shard = dealer.next_shard();
@@ -242,7 +252,7 @@ mod test {
             return TestResult::discard();
         }
 
-        let dealer = Dealer::new(n.into(), &secret);
+        let dealer = Dealer::new(n.into(), &secret).unwrap();
         let shards = (0..n)
             .map(|_| {
                 let shard = dealer.next_shard();
@@ -274,7 +284,7 @@ mod test {
         {
             return TestResult::discard();
         }
-        let dealer = Dealer::new(n.into(), secret);
+        let dealer = Dealer::new(n.into(), secret).unwrap();
         let shards = (0..(n - 1))
             .map(|_| {
                 let mut shard = dealer.next_shard();
@@ -322,7 +332,7 @@ mod test {
         if !(1..=RECOVER_UPPER).contains(&n) || test_xs.contains(&GfElem::ZERO) {
             return TestResult::discard();
         }
-        let dealer = Dealer::new(n.into(), secret);
+        let dealer = Dealer::new(n.into(), secret).unwrap();
         let shards = (0..n)
             .map(|_| {
                 let shard = dealer.next_shard();

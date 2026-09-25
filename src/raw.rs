@@ -78,9 +78,7 @@ fn raw_backup(matches: &ArgMatches) -> Result<(), Error> {
         .get_one::<String>("INPUT")
         .context("required INPUT argument not provided")?;
 
-    if num_shards < quorum_size {
-        return Err(anyhow!("invalid arguments: number of shards cannot be smaller than quorum size (such a backup is unrecoverable)"));
-    }
+    crate::validate_shard_counts(quorum_size, num_shards)?;
 
     let (mut stdin_reader, mut file_reader);
     let input: &mut dyn Read = if input_path == "-" {

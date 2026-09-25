@@ -83,7 +83,7 @@ impl Backup {
         .sign(&id_keypair);
 
         // Construct SSS dealer.
-        let dealer = Dealer::new(quorum_size, shard_secret);
+        let dealer = Dealer::new(quorum_size, shard_secret)?;
 
         Ok(Backup {
             main_document,
@@ -115,5 +115,20 @@ impl Backup {
             shard: self.dealer.next_shard(),
         }
         .sign(&self.id_keypair))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    use crate::shamir::Error as ShamirError;
+
+    #[test]
+    fn new_backup_rejects_zero_quorum() {
+        assert!(matches!(
+            Backup::new(0, b"secret"),
+            Err(Error::Shamir(ShamirError::ZeroThreshold))
+        ));
     }
 }

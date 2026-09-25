@@ -38,4 +38,7 @@ pub use shard::Shard;
 pub enum Error {
     #[error("lagrange interpolation failed: {0}")]
     LagrangeError(#[from] gf::Error),
+
+    #[error("threshold must be at least 1 (got 0)")]
+    ZeroThreshold,
 }

@@ -66,6 +66,24 @@ fn backup_cli() -> Command {
                 .index(1))
 }
 
+/// Validates that `quorum_size` (`-n`) and `num_shards` (`-k`) describe a
+/// backup that can actually be recovered: the quorum size must be at least
+/// one, and there must be at least as many shards created as are needed to
+/// meet the quorum.
+pub(crate) fn validate_shard_counts(quorum_size: u32, num_shards: u32) -> Result<(), Error> {
+    ensure!(
+        quorum_size > 0,
+        "invalid arguments: --quorum-size must be at least 1 (a backup with quorum size 0 cannot meaningfully be recovered)"
+    );
+    ensure!(
+        num_shards >= quorum_size,
+        "invalid arguments: number of shards ({}) cannot be smaller than quorum size ({}) -- such a backup is unrecoverable",
+        num_shards,
+        quorum_size
+    );
+    Ok(())
+}
+
 fn backup(matches: &ArgMatches) -> Result<(), Error> {
     let sealed = matches.get_flag("sealed");
     let quorum_size: u32 = matches
@@ -81,6 +99,8 @@ fn backup(matches: &ArgMatches) -> Result<(), Error> {
     let input_path = matches
         .get_one::<String>("INPUT")
         .context("required INPUT argument not provided")?;
+
+    validate_shard_counts(quorum_size, num_shards)?;
 
     let (mut stdin_reader, mut file_reader);
     let input: &mut dyn Read = if input_path == "-" {
@@ -531,4 +551,36 @@ fn main() -> Result<(), Box<dyn StdError>> {
 #[test]
 fn verify_cli() {
     cli().debug_assert();
+}
+
+#[cfg(test)]
+mod validate_shard_counts_test {
+    use super::validate_shard_counts;
+
+    #[test]
+    fn rejects_shards_below_quorum() {
+        let err = validate_shard_counts(5, 2).unwrap_err();
+        assert!(err.to_string().contains("unrecoverable"));
+    }
+
+    #[test]
+    fn rejects_zero_shards() {
+        assert!(validate_shard_counts(1, 0).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_quorum() {
+        let err = validate_shard_counts(0, 0).unwrap_err();
+        assert!(err.to_string().contains("quorum-size must be at least 1"));
+    }
+
+    #[test]
+    fn accepts_equal_shards_and_quorum() {
+        assert!(validate_shard_counts(3, 3).is_ok());
+    }
+
+    #[test]
+    fn accepts_more_shards_than_quorum() {
+        assert!(validate_shard_counts(2, 5).is_ok());
+    }
 }
