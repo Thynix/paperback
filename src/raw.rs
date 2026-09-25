@@ -19,7 +19,7 @@
 use std::{
     fs::File,
     io,
-    io::{prelude::*, BufReader},
+    io::{prelude::*, BufReader, IsTerminal},
 };
 
 use anyhow::{anyhow, Context, Error};
@@ -148,41 +148,44 @@ fn read_oneline_file(prompt: &str, path_or_stdin: &str) -> Result<String, Error>
 
 // paperback-cli raw restore --main-document <MAIN DOCUMENT> (--shards <SHARD>)... OUTPUT
 fn raw_restore_cli() -> Command {
-    Command::new("restore")
-        .about("Restore the secret data from a paperback backup.")
-        .arg(
-            Arg::new("main_document")
-                .short('M')
-                .long("main-document")
-                .value_name("MAIN DOCUMENT PATH")
-                .help(r#"Path to paperback main document ("-" to read from stdin)."#)
-                .action(ArgAction::Set)
-                .allow_hyphen_values(true)
-                .required(true),
-        )
-        .arg(
-            Arg::new("shards")
-                .short('s')
-                .long("shard")
-                .value_name("SHARD PATH")
-                .help(r#"Path to each paperback shard ("-" to read from stdin)."#)
-                .action(ArgAction::Append)
-                .allow_hyphen_values(true)
-                .required(true),
-        )
-        .arg(
-            Arg::new("OUTPUT")
-                .help(r#"Path to write recovered secret data to ("-" to write to stdout)."#)
-                .action(ArgAction::Set)
-                .allow_hyphen_values(true)
-                .required(true)
-                .index(1),
-        )
+    crate::add_echo_args(
+        Command::new("restore")
+            .about("Restore the secret data from a paperback backup.")
+            .arg(
+                Arg::new("main_document")
+                    .short('M')
+                    .long("main-document")
+                    .value_name("MAIN DOCUMENT PATH")
+                    .help(r#"Path to paperback main document ("-" to read from stdin)."#)
+                    .action(ArgAction::Set)
+                    .allow_hyphen_values(true)
+                    .required(true),
+            )
+            .arg(
+                Arg::new("shards")
+                    .short('s')
+                    .long("shard")
+                    .value_name("SHARD PATH")
+                    .help(r#"Path to each paperback shard ("-" to read from stdin)."#)
+                    .action(ArgAction::Append)
+                    .allow_hyphen_values(true)
+                    .required(true),
+            )
+            .arg(
+                Arg::new("OUTPUT")
+                    .help(r#"Path to write recovered secret data to ("-" to write to stdout)."#)
+                    .action(ArgAction::Set)
+                    .allow_hyphen_values(true)
+                    .required(true)
+                    .index(1),
+            ),
+    )
 }
 
 fn raw_restore(matches: &ArgMatches) -> Result<(), Error> {
     use paperback::{EncryptedKeyShard, FromWire, MainDocument, UntrustedQuorum};
 
+    let echo = crate::resolve_echo(matches);
     let main_document_path = matches
         .get_one::<String>("main_document")
         .context("required --main-document argument not provided")?;
@@ -214,10 +217,12 @@ fn raw_restore(matches: &ArgMatches) -> Result<(), Error> {
         .with_context(|| format!("decode shard {}", idx + 1))?;
 
         println!("Shard Checksum: {}", encrypted_shard.checksum_string());
+        if !echo && io::stdin().is_terminal() {
+            println!("(input will not be echoed)");
+        }
         print!("Shard {} Codeword: ", idx + 1);
         io::stdout().flush()?;
-        let mut codeword_input = String::new();
-        io::stdin().read_line(&mut codeword_input)?;
+        let codeword_input = crate::read_secret_line(echo)?.unwrap_or_default();
 
         let codewords = codeword_input
             .split_whitespace()
@@ -261,32 +266,35 @@ fn raw_restore(matches: &ArgMatches) -> Result<(), Error> {
 
 // paperback-cli raw expand --new-shards <N> (--shards <SHARD>)...
 fn raw_expand_cli() -> Command {
-    Command::new("expand")
-        .about("Restore the secret data from a paperback backup.")
-        .arg(
-            Arg::new("new-shards")
-                .short('n')
-                .long("new-shards")
-                .value_name("NUM SHARDS")
-                .help(r#"Number of new shards to create."#)
-                .action(ArgAction::Set)
-                .required(true),
-        )
-        .arg(
-            Arg::new("shards")
-                .short('s')
-                .long("shard")
-                .value_name("SHARDS")
-                .help(r#"Path to each paperback shard ("-" to read from stdin)."#)
-                .action(ArgAction::Append)
-                .allow_hyphen_values(true)
-                .required(true),
-        )
+    crate::add_echo_args(
+        Command::new("expand")
+            .about("Restore the secret data from a paperback backup.")
+            .arg(
+                Arg::new("new-shards")
+                    .short('n')
+                    .long("new-shards")
+                    .value_name("NUM SHARDS")
+                    .help(r#"Number of new shards to create."#)
+                    .action(ArgAction::Set)
+                    .required(true),
+            )
+            .arg(
+                Arg::new("shards")
+                    .short('s')
+                    .long("shard")
+                    .value_name("SHARDS")
+                    .help(r#"Path to each paperback shard ("-" to read from stdin)."#)
+                    .action(ArgAction::Append)
+                    .allow_hyphen_values(true)
+                    .required(true),
+            ),
+    )
 }
 
 fn raw_expand(matches: &ArgMatches) -> Result<(), Error> {
     use paperback::{EncryptedKeyShard, FromWire, NewShardKind, ToWire, UntrustedQuorum};
 
+    let echo = crate::resolve_echo(matches);
     let shard_paths = matches
         .get_many::<String>("shards")
         .context("required --shard argument not provided")?;
@@ -305,10 +313,12 @@ fn raw_expand(matches: &ArgMatches) -> Result<(), Error> {
         .map_err(|err| anyhow!(err)) // TODO: Fix this once FromWire supports non-String errors.
         .with_context(|| format!("decode shard {}", idx + 1))?;
 
+        if !echo && io::stdin().is_terminal() {
+            println!("(input will not be echoed)");
+        }
         print!("Shard {} Codeword: ", idx + 1);
         io::stdout().flush()?;
-        let mut codeword_input = String::new();
-        io::stdin().read_line(&mut codeword_input)?;
+        let codeword_input = crate::read_secret_line(echo)?.unwrap_or_default();
 
         let codewords = codeword_input
             .split_whitespace()

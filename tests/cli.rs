@@ -195,3 +195,85 @@ fn reprint_print_data_flag_smoke() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// `recover --interactive` reads a main document (via the QR-part joiner
+/// protocol), then, per required shard, a plain multibase payload and a line
+/// of codewords -- terminating each multiline prompt on a blank line. This
+/// builds exactly that shape of piped input directly from the
+/// `paperback_core` library (rather than through another CLI invocation,
+/// since there is no CLI flag that prints a shard's own text form) and feeds
+/// it to the compiled binary over a pipe (i.e. non-TTY stdin), asserting
+/// that recovery still succeeds end-to-end now that interactive prompts
+/// suppress terminal echo by default -- piped input must be unaffected by
+/// that change.
+#[test]
+fn recover_interactive_accepts_piped_input_end_to_end() {
+    use paperback_core::latest::{self as paperback, ToWire};
+
+    let secret = b"a small secret for the recover CLI test".to_vec();
+    let backup = paperback::Backup::new(1, &secret).expect("create backup");
+    let main_document = backup.main_document().clone();
+    let shard = backup.next_shard().expect("create shard");
+    let (encrypted_shard, codewords) = shard.encrypt().expect("encrypt shard");
+
+    let main_document_lines = main_document
+        .debug_qr_data_strings()
+        .expect("main document qr strings");
+    let shard_multibase = encrypted_shard.to_wire_multibase(multibase::Base::Base32Z);
+    let codewords_line = codewords.join(" ");
+
+    let mut stdin_data = String::new();
+    for line in &main_document_lines {
+        stdin_data.push_str(line);
+        stdin_data.push_str("\n\n");
+    }
+    stdin_data.push_str(&shard_multibase);
+    stdin_data.push_str("\n\n");
+    stdin_data.push_str(&codewords_line);
+    stdin_data.push_str("\n\n");
+
+    let dir = unique_temp_dir("recover-piped");
+    let output_path = dir.join("recovered.bin");
+    let output = run(
+        &dir,
+        &[
+            "recover",
+            "--interactive",
+            output_path.to_str().expect("output path is valid UTF-8"),
+        ],
+        Some(&stdin_data),
+    );
+    assert!(output.status.success(), "recover failed: {:?}", output);
+
+    let recovered = fs::read(&output_path).expect("read recovered secret");
+    assert_eq!(recovered, secret);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The `--echo`/`--no-echo` flags added alongside terminal-echo suppression
+/// must be mutually exclusive at the CLI level (clap should reject both
+/// together before any interactive prompt is attempted).
+#[test]
+fn recover_rejects_echo_and_no_echo_together() {
+    let dir = unique_temp_dir("recover-echo-conflict");
+
+    let output = run(
+        &dir,
+        &["recover", "--interactive", "--echo", "--no-echo", "-"],
+        None,
+    );
+    assert!(
+        !output.status.success(),
+        "recover should reject --echo and --no-echo together: {:?}",
+        output
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "expected a clap argument-conflict message, got: {}",
+        stderr
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

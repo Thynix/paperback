@@ -156,6 +156,19 @@ Note that when inputting data in "interactive mode" you have to put an extra
 blank space to indicate that you've finished inputting the data for that QR
 code. This is to allow you to break the input up over several lines.
 
+By default, none of these interactive prompts echo what you type to the
+terminal -- codewords and shard/main-document data are exactly what's needed
+to recover the secret, so leaving them visible in a terminal (and its
+scrollback) is an avoidable exposure. Pass `--echo` to any of the interactive
+subcommands if you want the old behavior back (e.g. to visually catch typos as
+you type), or `--no-echo` to force echo off explicitly. Piped, non-interactive
+input is unaffected either way. Note that suppressing echo only stops
+paperback itself from displaying what you typed: terminal scrollback, `tmux`/
+`screen` capture panes, and shell/session logging features (e.g. iTerm2's
+session logging) can still retain it outside paperback's control, so it's
+worth clearing scrollback or using a fresh terminal session before running
+`recover --interactive`.
+
 Currently, paperback only supports "interactive" input. In the future, paperback
 will be able to automatically scan the data from each QR code in an image or PDF
 version of the documents.
