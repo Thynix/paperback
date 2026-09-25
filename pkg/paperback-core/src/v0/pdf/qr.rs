@@ -85,7 +85,9 @@ impl FromWire for PartMeta {
 
         fn parse(input: &[u8]) -> IResult<&[u8], (u32, PartType, usize)> {
             let (input, version) = varuint_nom::u32(input)?;
-            let (input, data_type) = PartType::from_wire_partial(input).unwrap(); // TODO TODO TODO
+            let (input, data_type) = PartType::from_wire_partial(input).map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?;
             let (input, num_parts) = varuint_nom::usize(input)?;
 
             Ok((input, (version, data_type, num_parts)))
@@ -141,10 +143,11 @@ impl FromWire for Part {
 
         fn parse(input: &[u8]) -> IResult<&[u8], (PartMeta, usize, Vec<u8>)> {
             let (input, _) = tag(b"Pb")(input)?;
-            let (input, meta) = PartMeta::from_wire_partial(input).unwrap(); // TODO TODO TODO
+            let (input, meta) = PartMeta::from_wire_partial(input).map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+            })?;
             let (input, part_idx) = varuint_nom::usize(input)?;
-            // TODO: Is this correct?
-            let (input, data) = (&input[0..0], input.to_vec());
+            let (input, data) = (&input[input.len()..], input.to_vec());
 
             Ok((input, (meta, part_idx, data)))
         }
@@ -162,6 +165,12 @@ impl FromWire for Part {
         ))
     }
 }
+
+// Comfortably above the current hard cap of 9 codes used for the main
+// document (see `TooManyCodes` / `generate.rs`), with headroom, while still
+// bounding the allocation `add_part` makes from an attacker-controlled
+// `num_parts` decoded from a scanned QR code.
+const MAX_PARTS: usize = 512;
 
 #[derive(Default, Debug)]
 pub struct Joiner {
@@ -194,6 +203,9 @@ impl Joiner {
                 });
             }
         } else {
+            if part.meta.num_parts == 0 || part.meta.num_parts > MAX_PARTS {
+                return Err(Error::MismatchedQrCode);
+            }
             self.meta = Some(part.meta);
             self.parts = vec![None; part.meta.num_parts];
         }
@@ -289,6 +301,27 @@ mod test {
     #[quickcheck]
     fn split_join_qr_parts(data: Vec<u8>) -> Result<bool, Error> {
         let mut parts = split_data(PartType::MainDocumentData, &data);
+
+        // Fuzz every truncated prefix of an encoded part -- the real-world
+        // "scan cut off partway through" case. Parsing must never panic
+        // (quickcheck itself catches and reports that). A truncation inside
+        // the fixed-size header (magic, version, type, num_parts, part_idx)
+        // must be rejected with `Err`. A truncation inside the trailing
+        // `data` segment still parses successfully with fewer data bytes,
+        // since that field has no explicit length prefix and simply
+        // consumes whatever remains -- that's an existing property of the
+        // wire format, not a panic risk.
+        for part in &parts {
+            let encoded = part.to_wire();
+            let header_len = encoded.len() - part.data.len();
+            for len in 0..encoded.len() {
+                let result = Part::from_wire_partial(&encoded[..len]);
+                if len < header_len {
+                    assert!(result.is_err());
+                }
+            }
+        }
+
         let mut joiner = Joiner::new();
 
         parts.shuffle(&mut rand::thread_rng());
@@ -296,5 +329,68 @@ mod test {
             joiner.add_part(part)?;
         }
         Ok(joiner.combine_parts()? == data)
+    }
+
+    #[test]
+    fn part_type_from_wire_rejects_empty_input() {
+        assert!(PartType::from_wire_partial(b"").is_err());
+    }
+
+    #[test]
+    fn part_meta_from_wire_rejects_truncated_after_version() {
+        // Version varint only -- no type byte or num_parts left.
+        assert!(PartMeta::from_wire_partial(&[0x00]).is_err());
+    }
+
+    #[test]
+    fn part_meta_from_wire_rejects_truncated_after_type() {
+        // Version + type byte, but no num_parts varint.
+        assert!(PartMeta::from_wire_partial(&[0x00, b'D']).is_err());
+    }
+
+    #[test]
+    fn part_from_wire_rejects_truncated_magic_only() {
+        assert!(Part::from_wire_partial(b"Pb").is_err());
+    }
+
+    #[test]
+    fn part_from_wire_rejects_truncated_after_type() {
+        assert!(Part::from_wire_partial(b"Pb\x00\x44").is_err());
+    }
+
+    #[test]
+    fn part_from_wire_rejects_unknown_type_byte() {
+        // Valid magic and version, but an unrecognised data-type byte.
+        assert!(Part::from_wire_partial(b"Pb\x00\x41").is_err());
+    }
+
+    #[test]
+    fn joiner_add_part_rejects_absurd_num_parts() {
+        let part = Part {
+            meta: PartMeta {
+                version: PAPERBACK_VERSION,
+                data_type: PartType::MainDocumentData,
+                num_parts: usize::MAX,
+            },
+            part_idx: 0,
+            data: vec![],
+        };
+        let mut joiner = Joiner::new();
+        assert!(joiner.add_part(part).is_err());
+    }
+
+    #[test]
+    fn joiner_add_part_rejects_zero_num_parts() {
+        let part = Part {
+            meta: PartMeta {
+                version: PAPERBACK_VERSION,
+                data_type: PartType::MainDocumentData,
+                num_parts: 0,
+            },
+            part_idx: 0,
+            data: vec![],
+        };
+        let mut joiner = Joiner::new();
+        assert!(joiner.add_part(part).is_err());
     }
 }
