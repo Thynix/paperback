@@ -58,6 +58,10 @@ fn backup_cli() -> Command {
                 .help("Number of shards to create (must not be smaller than --quorum-size).")
                 .action(ArgAction::Set)
                 .required(true))
+            .arg(Arg::new("print-data")
+                .long("print-data")
+                .help("Print the encrypted main document QR payload to stdout. This is sensitive data -- only use this until PDF scanning is implemented and you need the text form back without a scanner.")
+                .action(ArgAction::SetTrue))
             .arg(Arg::new("INPUT")
                 .help(r#"Path to file containing secret data to backup ("-" to read from stdin)."#)
                 .action(ArgAction::Set)
@@ -144,6 +148,13 @@ fn backup(matches: &ArgMatches) -> Result<(), Error> {
                 main_document.id(),
                 shard_id
             ))?))?;
+    }
+
+    if matches.get_flag("print-data") {
+        eprintln!("WARNING: printing main document payload to stdout; this is sensitive data.");
+        for line in main_document.debug_qr_data_strings()? {
+            println!("{}", line);
+        }
     }
 
     Ok(())
@@ -461,6 +472,10 @@ fn reprint_cli() -> Command {
                 .arg("shard")
                 .required(true),
         )
+        .arg(Arg::new("print-data")
+            .long("print-data")
+            .help("When reprinting a main document, also print its encrypted QR payload to stdout. This is sensitive data -- only use this until PDF scanning is implemented and you need the text form back without a scanner. Has no effect with --shard.")
+            .action(ArgAction::SetTrue))
 }
 
 fn reprint(matches: &ArgMatches) -> Result<(), Error> {
@@ -469,6 +484,7 @@ fn reprint(matches: &ArgMatches) -> Result<(), Error> {
 
     let mut main_document: MainDocument;
     let mut shard_pair: (EncryptedKeyShard, KeyShardCodewords);
+    let mut main_document_payload: Option<Vec<String>> = None;
     let (pdf, path_basename): (&mut dyn ToPdf, String) = match matches
         .get_one::<clap::Id>("type")
         .context("neither --main-document nor --shard provided")?
@@ -481,6 +497,10 @@ fn reprint(matches: &ArgMatches) -> Result<(), Error> {
                 "Main document checksum: {}",
                 main_document.checksum_string()
             );
+
+            if matches.get_flag("print-data") {
+                main_document_payload = Some(main_document.debug_qr_data_strings()?);
+            }
 
             let pathname = format!("main-document-{}.pdf", main_document.id());
             (&mut main_document, pathname)
@@ -506,6 +526,19 @@ fn reprint(matches: &ArgMatches) -> Result<(), Error> {
 
     pdf.to_pdf()?
         .save(&mut BufWriter::new(File::create(path_basename)?))?;
+
+    match main_document_payload {
+        Some(lines) => {
+            eprintln!("WARNING: printing main document payload to stdout; this is sensitive data.");
+            for line in lines {
+                println!("{}", line);
+            }
+        }
+        None if matches.get_flag("print-data") => {
+            eprintln!("--print-data has no effect when reprinting a key shard.");
+        }
+        None => {}
+    }
 
     Ok(())
 }

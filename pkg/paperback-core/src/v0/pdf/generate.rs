@@ -279,7 +279,7 @@ const FONT_B612MONO_BOLD: &[u8] = include_bytes!("fonts/B612Mono-Bold.ttf");
 impl ToPdf for MainDocument {
     fn to_pdf(&self) -> Result<PdfDocumentReference, Error> {
         // Generate QR codes to embed in the PDF.
-        let (data_qrs, data_qr_datas) =
+        let (data_qrs, _data_qr_datas) =
             qr::generate_codes(PartType::MainDocumentData, self.to_wire())?;
         let data_qrs = data_qrs
             .iter()
@@ -393,12 +393,6 @@ impl ToPdf for MainDocument {
             colours::MAIN_DOCUMENT_TRIM,
         ) + Mm(2.0);
 
-        // TODO: Get rid of this once we have nice QR code scanning.
-        println!("Main Document:");
-        data_qr_datas
-            .iter()
-            .for_each(|code| println!("{}", multibase::encode(multibase::Base::Base10, code)));
-
         let mut current_x = A4_MARGIN;
         let mut data_qr_refs = data_qrs
             .into_iter()
@@ -511,6 +505,22 @@ impl ToPdf for MainDocument {
 
         doc.check_for_errors()?;
         Ok(doc)
+    }
+}
+
+impl MainDocument {
+    /// Returns the same Base10-encoded QR payload chunks that are embedded in
+    /// the PDF produced by [`ToPdf::to_pdf`], as text, without printing or
+    /// logging anything. This exists for callers that need the text form of
+    /// the main document data (e.g. until PDF scanning is implemented); it is
+    /// the caller's responsibility to decide whether printing this sensitive,
+    /// unencrypted-by-paper-backup-standards output is appropriate.
+    pub fn debug_qr_data_strings(&self) -> Result<Vec<String>, Error> {
+        let (_, data_qr_datas) = qr::generate_codes(PartType::MainDocumentData, self.to_wire())?;
+        Ok(data_qr_datas
+            .iter()
+            .map(|code| multibase::encode(multibase::Base::Base10, code))
+            .collect())
     }
 }
 
@@ -850,6 +860,35 @@ mod test {
             backup.main_document().to_pdf(),
             Err(Error::TooManyCodes(_))
         ));
+    }
+
+    #[test]
+    fn main_document_debug_qr_data_strings_matches_generated_codes() {
+        // to_pdf() must not need to print anything to produce a valid PDF,
+        // and debug_qr_data_strings() must return the exact same encoded
+        // chunks that get embedded as QR codes on the page.
+        let backup = Backup::new(2, b"a small secret").unwrap();
+        let main_document = backup.main_document();
+
+        assert!(main_document.to_pdf().is_ok());
+
+        let (_, expected_data) =
+            qr::generate_codes(PartType::MainDocumentData, main_document.to_wire()).unwrap();
+        let expected_strings = expected_data
+            .iter()
+            .map(|code| multibase::encode(multibase::Base::Base10, code))
+            .collect::<Vec<_>>();
+
+        let actual_strings = main_document.debug_qr_data_strings().unwrap();
+        assert_eq!(actual_strings, expected_strings);
+
+        // Each string must round-trip through multibase decoding back to the
+        // exact bytes embedded in the QR codes on the page.
+        for (string, expected_bytes) in actual_strings.iter().zip(expected_data.iter()) {
+            let (base, decoded) = multibase::decode(string).unwrap();
+            assert_eq!(base, multibase::Base::Base10);
+            assert_eq!(&decoded, expected_bytes);
+        }
     }
 
     #[test]
