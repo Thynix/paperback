@@ -1,0 +1,86 @@
+# paperback: paper backup generator suitable for long-term storage
+# Copyright (C) 2018-2022 Aleksa Sarai <cyphar@cyphar.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+[package]
+name = "paperback-fuzz"
+version = "0.0.0"
+authors = ["Aleksa Sarai <cyphar@cyphar.com>"]
+license = "GPL-3.0-or-later"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.paperback-core]
+path = "../pkg/paperback-core"
+
+# Required so that unsigned-varint's nom-error type matches the `nom`
+# version paperback-core uses (see the root Cargo.toml and AGENTS.md's
+# "known build friction" section for the same patch). This crate is its own
+# workspace root (see `[workspace]` below), so it does not inherit the
+# parent workspace's `[patch.crates-io]` -- without a copy of it here,
+# paperback-core fails to compile against plain crates.io unsigned-varint.
+[patch.crates-io]
+unsigned-varint = { git = "https://github.com/cyphar/unsigned-varint", branch = "nom6-errors" }
+
+# Every target's contract is "decoding arbitrary bytes must never panic; it
+# may return Ok or Err freely" (see plans/F13-no-fuzzing-or-malformed-input-tests.md).
+# libFuzzer builds typically use `--release`, whose default profile silently
+# wraps integer overflow instead of panicking -- explicitly re-enable
+# overflow checks so an overflow bug (like the one fixed for the multihash
+# length varint) is still caught as a crash while fuzzing.
+[profile.release]
+overflow-checks = true
+
+[[bin]]
+name = "fuzz_main_document_from_wire"
+path = "fuzz_targets/fuzz_main_document_from_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_key_shard_from_wire"
+path = "fuzz_targets/fuzz_key_shard_from_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_encrypted_key_shard_from_wire"
+path = "fuzz_targets/fuzz_encrypted_key_shard_from_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_qr_part_join"
+path = "fuzz_targets/fuzz_qr_part_join.rs"
+test = false
+doc = false
+bench = false
+
+# Decouples this crate from the parent workspace (see cargo-fuzz's convention:
+# https://rust-fuzz.github.io/book/cargo-fuzz/setup.html), so the parent's
+# `[workspace] members` in the root Cargo.toml never needs to list it, and
+# ordinary `cargo build`/`cargo test --workspace` runs from the repository
+# root are unaffected.
+[workspace]
+members = ["."]

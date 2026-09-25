@@ -89,3 +89,39 @@ jobs:
       with:
         name: report
         path: target/criterion/
+
+  fuzz:
+    name: cargo fuzz
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - fuzz_main_document_from_wire
+          - fuzz_key_shard_from_wire
+          - fuzz_encrypted_key_shard_from_wire
+          - fuzz_qr_part_join
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo install cargo-fuzz
+      # Accumulate each target's discovered corpus across runs instead of
+      # restarting cold every time -- the checked-in fuzz/corpus/<target>/
+      # seeds (real `to_wire()` output) are always present regardless of
+      # cache state.
+      - name: restore fuzz corpus cache
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+      # Cheap, time-boxed run on every push/PR; the nightly `schedule` run
+      # gets a much longer budget for deeper coverage, off the PR critical
+      # path.
+      - run: >-
+          cargo +nightly fuzz run ${{ matrix.target }} --
+          -max_total_time=${{ github.event_name == 'schedule' && '1800' || '120' }}
