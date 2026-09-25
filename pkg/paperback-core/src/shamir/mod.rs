@@ -41,4 +41,24 @@ pub enum Error {
 
     #[error("threshold must be at least 1 (got 0)")]
     ZeroThreshold,
+
+    #[error("must be provided at least one shard")]
+    NoShards,
+
+    #[error("shards have inconsistent threshold: expected {expected} but shard had {actual}")]
+    InconsistentThreshold { expected: u32, actual: u32 },
+
+    #[error(
+        "shards have inconsistent length: expected {expected} y-values but shard had {actual}"
+    )]
+    InconsistentShardLength { expected: usize, actual: usize },
+
+    #[error("shards have inconsistent secret length: expected {expected} but shard had {actual}")]
+    InconsistentSecretLen { expected: usize, actual: usize },
+
+    #[error("wrong number of shards: need exactly {needed} but got {given}")]
+    WrongShardCount { needed: usize, given: usize },
+
+    #[error("shard secret_len ({secret_len}) exceeds available secret bytes ({available})")]
+    SecretLenOutOfRange { secret_len: usize, available: usize },
 }

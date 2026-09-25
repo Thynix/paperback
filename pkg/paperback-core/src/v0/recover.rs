@@ -462,3 +462,37 @@ impl Quorum {
         .sign(&id_keypair))
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    use crate::{shamir::Error as ShamirError, v0::Backup};
+
+    #[test]
+    fn quorum_new_shard_wrong_count_no_main_document_returns_err() {
+        // Build a quorum with no main document and fewer shards than the
+        // quorum's threshold requires. Without a main document,
+        // `UntrustedQuorum::validate()` has no independent shard-count check
+        // (that check -- `InconsistentQuorumError` -- only runs when a main
+        // document is present), so this exercises `Dealer::recover`'s own
+        // count check as the sole backstop. Before that check was added,
+        // this reached an `assert!` in `Dealer::recover` and panicked
+        // instead of returning `Err`.
+        let backup = Backup::new(3, b"some secret").unwrap();
+        let mut quorum = UntrustedQuorum::new();
+        for _ in 0..2 {
+            quorum.push_shard(backup.next_shard().unwrap());
+        }
+        let quorum = quorum.validate().unwrap();
+        assert!(!quorum.has_main_document());
+
+        assert!(matches!(
+            quorum.new_shard(NewShardKind::NewShard),
+            Err(Error::Shamir(ShamirError::WrongShardCount {
+                needed: 3,
+                given: 2
+            }))
+        ));
+    }
+}

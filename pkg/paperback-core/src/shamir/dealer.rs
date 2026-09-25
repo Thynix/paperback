@@ -145,24 +145,48 @@ impl Dealer {
     /// with `Dealer::next_shard`.
     pub fn recover<S: AsRef<[Shard]>>(shards: S) -> Result<Self, Error> {
         let shards = shards.as_ref();
-        assert!(!shards.is_empty(), "must be provided at least one shard");
+        let first = shards.first().ok_or(Error::NoShards)?;
 
-        let threshold = shards[0].threshold();
-        let polys_len = shards[0].ys.len();
-        let secret_len = shards[0].secret_len;
+        let threshold = first.threshold();
+        let polys_len = first.ys.len();
+        let secret_len = first.secret_len;
 
         // TODO: Implement this consistency checking more nicely.
         for shard in shards {
-            assert!(shard.threshold() == threshold, "shards must be consistent");
-            assert!(shard.ys.len() == polys_len, "shards must be consistent");
-            assert!(shard.secret_len == secret_len, "shards must be consistent");
+            if shard.threshold() != threshold {
+                return Err(Error::InconsistentThreshold {
+                    expected: threshold,
+                    actual: shard.threshold(),
+                });
+            }
+            if shard.ys.len() != polys_len {
+                return Err(Error::InconsistentShardLength {
+                    expected: polys_len,
+                    actual: shard.ys.len(),
+                });
+            }
+            if shard.secret_len != secret_len {
+                return Err(Error::InconsistentSecretLen {
+                    expected: secret_len,
+                    actual: shard.secret_len,
+                });
+            }
         }
 
-        assert!(
-            shards.len() == threshold as usize,
-            "must have exactly {} shards",
-            threshold
-        );
+        if shards.len() != threshold as usize {
+            return Err(Error::WrongShardCount {
+                needed: threshold as usize,
+                given: shards.len(),
+            });
+        }
+
+        let available = polys_len.saturating_mul(mem::size_of::<GfElemPrimitive>());
+        if secret_len > available {
+            return Err(Error::SecretLenOutOfRange {
+                secret_len,
+                available,
+            });
+        }
 
         let polys = (0..polys_len)
             .into_par_iter()
@@ -199,6 +223,87 @@ mod test {
         assert!(matches!(
             Dealer::new(0u32, [1, 2, 3]),
             Err(Error::ZeroThreshold)
+        ));
+    }
+
+    fn dummy_shard(x: u32, ys_len: usize, threshold: u32, secret_len: usize) -> Shard {
+        Shard {
+            x: GfElem::from_inner(x),
+            ys: (0..ys_len)
+                .map(|i| GfElem::from_inner(i as u32 + 1))
+                .collect(),
+            threshold,
+            secret_len,
+        }
+    }
+
+    #[test]
+    fn recover_empty_shards_returns_err() {
+        assert!(matches!(
+            Dealer::recover(Vec::<Shard>::new()),
+            Err(Error::NoShards)
+        ));
+    }
+
+    #[test]
+    fn recover_inconsistent_threshold_returns_err() {
+        let shards = vec![dummy_shard(1, 2, 2, 4), dummy_shard(2, 2, 3, 4)];
+        assert!(matches!(
+            Dealer::recover(shards),
+            Err(Error::InconsistentThreshold {
+                expected: 2,
+                actual: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn recover_inconsistent_ys_len_returns_err() {
+        let shards = vec![dummy_shard(1, 2, 2, 4), dummy_shard(2, 3, 2, 4)];
+        assert!(matches!(
+            Dealer::recover(shards),
+            Err(Error::InconsistentShardLength {
+                expected: 2,
+                actual: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn recover_inconsistent_secret_len_returns_err() {
+        let shards = vec![dummy_shard(1, 2, 2, 4), dummy_shard(2, 2, 2, 5)];
+        assert!(matches!(
+            Dealer::recover(shards),
+            Err(Error::InconsistentSecretLen {
+                expected: 4,
+                actual: 5
+            })
+        ));
+    }
+
+    #[test]
+    fn recover_wrong_shard_count_returns_err() {
+        // threshold 3, but only 2 shards provided.
+        let shards = vec![dummy_shard(1, 2, 3, 4), dummy_shard(2, 2, 3, 4)];
+        assert!(matches!(
+            Dealer::recover(shards),
+            Err(Error::WrongShardCount {
+                needed: 3,
+                given: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn recover_secret_len_exceeds_available_returns_err() {
+        // ys.len() == 1 means 4 bytes available, but secret_len claims 100.
+        let shards = vec![dummy_shard(1, 1, 1, 100)];
+        assert!(matches!(
+            Dealer::recover(shards),
+            Err(Error::SecretLenOutOfRange {
+                secret_len: 100,
+                available: 4
+            })
         ));
     }
 
