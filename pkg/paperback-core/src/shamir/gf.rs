@@ -33,6 +33,9 @@ pub enum Error {
 
     #[error("[critical security issue] all points must have an invertible (non-zero) x value")]
     NonInvertiblePoint,
+
+    #[error("wrong number of bytes for field element: expected {expected} but got {actual}")]
+    WrongByteLength { expected: usize, actual: usize },
 }
 
 /// Primitive uint type for GfElems.
@@ -86,7 +89,7 @@ impl GfElem {
 
         // Pad with zeroes.
         let mut padded = [0u8; mem::size_of::<GfElemPrimitive>()];
-        padded[..len].copy_from_slice(bytes);
+        padded[..len].copy_from_slice(&bytes[..len]);
 
         // Convert to GfElem.
         (
@@ -99,6 +102,22 @@ impl GfElem {
         let (elem, remain) = Self::from_bytes_partial(bytes.as_ref());
         assert!(remain.is_empty());
         elem
+    }
+
+    /// Fallible counterpart to [`GfElem::from_bytes`] for use with
+    /// untrusted-length input (such as a decoded shard id), where a byte
+    /// slice longer than a field element cannot be handled by silently
+    /// discarding the remainder.
+    pub fn try_from_bytes<B: AsRef<[u8]>>(bytes: B) -> Result<Self, Error> {
+        let bytes = bytes.as_ref();
+        let (elem, remain) = Self::from_bytes_partial(bytes);
+        if !remain.is_empty() {
+            return Err(Error::WrongByteLength {
+                expected: mem::size_of::<GfElemPrimitive>(),
+                actual: bytes.len(),
+            });
+        }
+        Ok(elem)
     }
 
     pub fn to_bytes(self) -> Vec<u8> {
@@ -705,6 +724,36 @@ mod test {
 
     use quickcheck::TestResult;
     use rand::rngs::OsRng;
+
+    #[test]
+    fn try_from_bytes_exactly_four_bytes_ok() {
+        let bytes = [1u8, 2, 3, 4];
+        assert_eq!(
+            GfElem::try_from_bytes(bytes).unwrap(),
+            GfElem::from_bytes(bytes)
+        );
+    }
+
+    #[test]
+    fn try_from_bytes_short_payload_zero_pads() {
+        let bytes = [1u8, 2];
+        assert_eq!(
+            GfElem::try_from_bytes(bytes).unwrap(),
+            GfElem::from_bytes(bytes)
+        );
+    }
+
+    #[test]
+    fn try_from_bytes_oversized_payload_is_err_not_panic() {
+        let bytes = [1u8, 2, 3, 4, 5];
+        assert!(matches!(
+            GfElem::try_from_bytes(bytes),
+            Err(Error::WrongByteLength {
+                expected: 4,
+                actual: 5,
+            })
+        ));
+    }
 
     #[quickcheck]
     fn add_associativity(a: GfElem, b: GfElem) -> bool {

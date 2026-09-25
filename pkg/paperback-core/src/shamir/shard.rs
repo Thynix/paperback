@@ -52,9 +52,24 @@ impl Shard {
     }
 }
 
-pub fn parse_id(id: ShardId) -> Result<GfElem, multibase::Error> {
+/// Error returned by [`parse_id`] when a shard-id string cannot be decoded
+/// into a [`GfElem`].
+///
+/// Shard ids are typed or scanned in by a human, so any correctly-framed but
+/// otherwise malformed string must be rejected with an error rather than
+/// panicking.
+#[derive(Debug, thiserror::Error)]
+pub enum ParseIdError {
+    #[error("failed to decode shard id as multibase: {0}")]
+    Multibase(#[from] multibase::Error),
+
+    #[error("shard id decoded to the wrong number of bytes: {0}")]
+    WrongLength(#[from] crate::shamir::gf::Error),
+}
+
+pub fn parse_id(id: ShardId) -> Result<GfElem, ParseIdError> {
     let (_, data) = multibase::decode(id)?;
-    Ok(GfElem::from_bytes(data))
+    Ok(GfElem::try_from_bytes(data)?)
 }
 
 impl ToWire for Shard {
@@ -146,5 +161,36 @@ mod test {
     fn shard_bytes_roundtrip(shard: Shard) -> bool {
         let shard2 = Shard::from_wire(shard.to_wire()).unwrap();
         shard == shard2
+    }
+
+    #[test]
+    fn parse_id_rejects_oversized_payload() {
+        // 5 bytes, one more than a GfElem can hold -- must be a clean error,
+        // not a panic in GfElem::from_bytes.
+        let id = multibase::encode(multibase::Base::Base32Z, [1u8, 2, 3, 4, 5]);
+        assert!(matches!(
+            parse_id(id),
+            Err(ParseIdError::WrongLength(
+                crate::shamir::gf::Error::WrongByteLength {
+                    expected: 4,
+                    actual: 5,
+                }
+            ))
+        ));
+    }
+
+    #[quickcheck]
+    fn parse_id_accepts_exactly_4_bytes(shard: Shard) -> bool {
+        // A real Shard::id() is always exactly 4 raw bytes; round-tripping it
+        // through parse_id must succeed and recover the original x value.
+        matches!(parse_id(shard.id()), Ok(x) if x == shard.x)
+    }
+
+    #[test]
+    fn parse_id_short_payload_still_zero_pads() {
+        // Fewer than 4 bytes is intentionally accepted and zero-padded, both
+        // before and after this fix -- this is not a rejection case.
+        let id = multibase::encode(multibase::Base::Base32Z, [1u8, 2]);
+        assert_eq!(parse_id(id).unwrap(), GfElem::from_bytes([1u8, 2]));
     }
 }

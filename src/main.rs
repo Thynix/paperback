@@ -413,6 +413,11 @@ fn recreate_shards_cli() -> Command {
             .arg(Arg::new("shard-ids")
                 .value_name("SHARD ID")
                 .help(r#"Shard identifier(s) of the shard(s) to recreate."#)
+                .value_parser(|s: &str| {
+                    paperback::validate_shard_id(s)
+                        .map(|()| s.to_string())
+                        .map_err(|err| format!("invalid shard id {s:?}: {err}"))
+                })
                 .action(ArgAction::Append)
                 .required(true))
 }
@@ -551,6 +556,23 @@ fn main() -> Result<(), Box<dyn StdError>> {
 #[test]
 fn verify_cli() {
     cli().debug_assert();
+}
+
+#[test]
+fn main_recreate_shards_cli_rejects_invalid_shard_id() {
+    // A shard id that decodes to more than 4 bytes must be rejected by the
+    // clap value_parser immediately -- before any interactive shard entry is
+    // attempted -- rather than reaching GfElem::from_bytes and panicking.
+    let oversized_id = multibase::encode(multibase::Base::Base32Z, [1u8, 2, 3, 4, 5]);
+    let err = cli()
+        .try_get_matches_from([
+            "paperback-cli",
+            "recreate-shards",
+            "--interactive",
+            &oversized_id,
+        ])
+        .expect_err("oversized shard id should be rejected at argument-parse time");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
 }
 
 #[cfg(test)]

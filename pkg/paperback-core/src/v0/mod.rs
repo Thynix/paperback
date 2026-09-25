@@ -17,7 +17,7 @@
  */
 
 use crate::{
-    shamir::{Error as ShamirError, Shard},
+    shamir::{shard::ParseIdError, Error as ShamirError, Shard},
     v0::wire::prefixes::*,
 };
 
@@ -76,7 +76,7 @@ pub enum Error {
     ShardSecretDecode(String),
 
     #[error("failed to decode shard id: {0}")]
-    ShardIdDecode(multibase::Error),
+    ShardIdDecode(#[from] ParseIdError),
 
     #[error("failed to decode private key: {0}")]
     PrivateKeyDecode(ed25519_dalek::SignatureError),

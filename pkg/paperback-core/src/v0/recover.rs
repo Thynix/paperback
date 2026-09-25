@@ -358,6 +358,20 @@ impl UntrustedQuorum {
     }
 }
 
+/// Checks that `id` decodes into a well-formed shard identifier, without
+/// performing a full quorum recovery.
+///
+/// Shard ids are typed or scanned in by a human and passed to
+/// `Quorum::new_shard` through `NewShardKind::ExistingShard`, so callers
+/// (such as a CLI argument parser) can use this to reject a mistyped id
+/// immediately, rather than after an entire quorum has been interactively
+/// assembled.
+pub fn validate_shard_id(id: &str) -> Result<(), Error> {
+    shard::parse_id(id.to_string())
+        .map(|_| ())
+        .map_err(Error::ShardIdDecode)
+}
+
 /// The kind of shard expansion being requested in `Quorum::new_shard`.
 pub enum NewShardKind {
     /// Create a new shard with a random `ShardId` (x-value).
